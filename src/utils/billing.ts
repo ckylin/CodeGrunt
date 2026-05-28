@@ -154,15 +154,38 @@ export async function getMonthUsage(): Promise<UsageStats> {
   return result;
 }
 
+// ── Spinner helpers ───────────────────────────────────────────────────────
+
+function startSpinner(text: string): ReturnType<typeof setInterval> {
+  const frames = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+  let idx = 0;
+  process.stdout.write('\r' + chalk.gray(`${frames[0]} ${text}`));
+  const interval = setInterval(() => {
+    process.stdout.write('\r' + chalk.gray(`${frames[idx]} ${text}`));
+    idx = (idx + 1) % frames.length;
+  }, 80);
+  return interval;
+}
+
+function stopSpinner(interval: ReturnType<typeof setInterval>): void {
+  clearInterval(interval);
+  process.stdout.write('\r' + ' '.repeat(50) + '\r');
+}
+
 // ── Display ───────────────────────────────────────────────────────────────
 
 export async function printBalanceAndUsage(apiKey: string, baseURL: string, model: string): Promise<void> {
+  // Spinner while fetching balance (network call to DeepSeek API)
+  const spinner = startSpinner('Fetching balance & usage…');
+
   // Fetch balance in parallel with reading local usage
   const [balanceResult, todayUsage, monthUsage] = await Promise.allSettled([
     fetchBalance(apiKey, baseURL),
     getTodayUsage(),
     getMonthUsage(),
   ]);
+
+  stopSpinner(spinner);
 
   console.log();
 

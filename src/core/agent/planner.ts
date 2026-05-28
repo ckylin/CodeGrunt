@@ -46,6 +46,7 @@ function buildPlannerPrompt(language: 'zh' | 'en', task: string): string {
 \`\`\`
 
 ## 规划原则
+0. **保持简洁。描述用短句，不要写段落。**
 1. 每个步骤必须独立可验证——有明确的"完成"标准
 2. 读写分离：先读文件了解现状，再编辑/写入
 3. 每步最多使用 1-2 个工具（DeepSeek 多工具并行不够稳定）
@@ -79,6 +80,7 @@ Place your plan in a JSON code block:
 \`\`\`
 
 ## Planning Principles
+0. **Be concise. Use short phrases, not paragraphs.**
 1. Each step must be independently verifiable — clear "done" criteria
 2. Read before write: read files to understand context before editing
 3. Max 1-2 tools per step (DeepSeek multi-tool parallelism is unreliable)

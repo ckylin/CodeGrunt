@@ -12,6 +12,7 @@
 // Ref: src/providers/deepseek/provider.ts for stream API
 // Ref: src/core/pipeline/stages/prepare-context.ts L103 for reasoner pattern
 
+import chalk from 'chalk';
 import type { LLMProvider, Message, StreamChunk } from '../../types.js';
 
 // ── Constants ───────────────────────────────────────────────────────────────
@@ -115,18 +116,29 @@ async function streamSummary(
   maxTokens: number,
   signal?: AbortSignal,
 ): Promise<string> {
+  // Dot-progress indicator — streamSummary can be called from compactMessages
+  // which may run 1-3+ LLM calls for chunking + merging. Gives user visible
+  // feedback without interfering with concurrent spinners in commands.ts.
+  const dotInterval = setInterval(() => {
+    process.stdout.write(chalk.gray('.'));
+  }, 1000);
+
   let summary = '';
-  const stream = provider.stream(messages, {
-    model,
-    maxTokens,
-    // Reasoner models don't support temperature — omit it.
-    ...(isReasoner ? {} : { temperature: 0.2 }),
-    signal,
-  });
-  for await (const chunk of stream) {
-    if (chunk.type === 'text_delta') summary += chunk.text;
+  try {
+    const stream = provider.stream(messages, {
+      model,
+      maxTokens,
+      // Reasoner models don't support temperature — omit it.
+      ...(isReasoner ? {} : { temperature: 0.2 }),
+      signal,
+    });
+    for await (const chunk of stream) {
+      if (chunk.type === 'text_delta') summary += chunk.text;
+    }
+    return summary.trim();
+  } finally {
+    clearInterval(dotInterval);
   }
-  return summary.trim();
 }
 
 // ── Chunking ─────────────────────────────────────────────────────────────────

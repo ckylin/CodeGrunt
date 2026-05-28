@@ -59,7 +59,7 @@ async function resolveOne(
 ): Promise<AtReference | null> {
   // URL
   if (target.startsWith('http://') || target.startsWith('https://')) {
-    const content = await fetchUrl(target);
+    const content = await fetchUrlWithSpinner(target);
     return { raw, type: 'url', target, content };
   }
 
@@ -120,17 +120,35 @@ async function collectFiles(root: string, dir: string, lines: string[], depth = 
   }
 }
 
-async function fetchUrl(url: string): Promise<string> {
+async function fetchUrlWithSpinner(url: string): Promise<string> {
+  // Spinner while fetching URL (network call, 10s timeout)
+  const frames = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+  let idx = 0;
+  const shortUrl = url.length > 50 ? url.slice(0, 50) + '…' : url;
+  process.stdout.write('\r' + chalk.gray(`${frames[0]} Fetching ${shortUrl}`));
+  const interval = setInterval(() => {
+    process.stdout.write('\r' + chalk.gray(`${frames[idx]} Fetching ${shortUrl}`));
+    idx = (idx + 1) % frames.length;
+  }, 80);
+
   try {
     const res = await fetch(url, { signal: AbortSignal.timeout(10_000) });
-    if (!res.ok) return `[HTTP ${res.status} fetching ${url}]`;
+    if (!res.ok) {
+      clearInterval(interval);
+      process.stdout.write('\r' + ' '.repeat(60) + '\r');
+      return `[HTTP ${res.status} fetching ${url}]`;
+    }
     const text = await res.text();
+    clearInterval(interval);
+    process.stdout.write('\r' + ' '.repeat(60) + '\r');
     // Strip HTML tags for readability
     const stripped = text.replace(/<[^>]+>/g, ' ').replace(/\s{2,}/g, ' ').trim();
     return stripped.length > MAX_FILE_CHARS
       ? stripped.slice(0, MAX_FILE_CHARS) + '\n[truncated]'
       : stripped;
   } catch (err) {
+    clearInterval(interval);
+    process.stdout.write('\r' + ' '.repeat(60) + '\r');
     return `[Failed to fetch ${url}: ${err instanceof Error ? err.message : String(err)}]`;
   }
 }
