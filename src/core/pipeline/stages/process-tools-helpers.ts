@@ -20,6 +20,10 @@ export function resetYesAll(): void {
   yesAllSessionActive = false;
 }
 
+export function isYesAllActive(): boolean {
+  return yesAllSessionActive;
+}
+
 // ── Confirm helper ─────────────────────────────────────────────────────────
 
 async function confirmOrSkip(
@@ -88,6 +92,9 @@ export async function executeToolCall(
     const preview = applyEdit(original, oldString, newString);
     if (preview === null) {
       return { success: false, output: '', error: `old_string not found in ${filePath}.` };
+    }
+    if (preview === 'AMBIGUOUS') {
+      return { success: false, output: '', error: `old_string appears more than once in ${filePath}. Provide more surrounding context to make it unique.` };
     }
 
     const confirmStart = Date.now();
