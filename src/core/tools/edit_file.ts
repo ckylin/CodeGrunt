@@ -44,7 +44,19 @@ export const editFileTool: Tool = {
       };
     }
 
-    const updated = original.replace(oldString, newString);
+    // Reject ambiguous edits — old_string must appear exactly once.
+    // Ref: utils/confirm.ts applyEdit for the same guard in the confirm path.
+    const firstIdx = original.indexOf(oldString);
+    const lastIdx = original.lastIndexOf(oldString);
+    if (firstIdx !== lastIdx) {
+      return {
+        success: false,
+        output: '',
+        error: `old_string appears more than once in ${filePath}. Provide more surrounding context to make the match unique.`,
+      };
+    }
+
+    const updated = original.slice(0, firstIdx) + newString + original.slice(firstIdx + oldString.length);
     await writeFile(filePath, updated, 'utf-8');
     // Diff already shown in confirmation dialog; here we just confirm success
     return { success: true, output: `Edited ${filePath}` , confirmDurationMs: (args._confirmDurationMs as number) ?? 0 };

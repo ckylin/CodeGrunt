@@ -68,5 +68,11 @@ export async function confirmEdit(
 
 export function applyEdit(original: string, oldString: string, newString: string): string | null {
   if (!original.includes(oldString)) return null;
-  return original.replace(oldString, newString);
+  // Reject ambiguous edits — old_string must appear exactly once so the replacement
+  // target is unambiguous. If it appears more than once, require the caller to
+  // provide more surrounding context to make the match unique.
+  const firstIdx = original.indexOf(oldString);
+  const lastIdx = original.lastIndexOf(oldString);
+  if (firstIdx !== lastIdx) return 'AMBIGUOUS';
+  return original.slice(0, firstIdx) + newString + original.slice(firstIdx + oldString.length);
 }
