@@ -12,6 +12,7 @@ import { editFileTool } from './edit_file.js';
 import { executeShellTool } from './execute_shell.js';
 import { listDirectoryTool } from './list_directory.js';
 import { searchFilesTool } from './search_files.js';
+import { memoryWriteTool, memoryReadTool } from './memory.js';
 import { getLogger } from '../observability/logger.js';
 
 const log = getLogger('tools:registry');
@@ -89,6 +90,8 @@ export class ToolRegistry {
       executeShellTool,
       listDirectoryTool,
       searchFilesTool,
+      memoryWriteTool,
+      memoryReadTool,
     ];
     for (const tool of builtins) {
       this.register(tool, 'builtin');
