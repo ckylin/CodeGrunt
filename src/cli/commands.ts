@@ -11,6 +11,7 @@ import { MarkdownRenderer } from '../utils/markdown.js';
 import { selectFromList } from '../utils/select.js';
 import { isReasonerModel } from '../config.js';
 import { runInit } from './init.js';
+import { saveSessionSummary, loadSessionSummary, deleteEntry, listEntries } from '../core/memory/store.js';
 
 
 export interface CommandDescriptor {
@@ -25,6 +26,7 @@ export const BUILTIN_COMMANDS: CommandDescriptor[] = [
   { name: 'config',  desc: 'View or change config (temperature, reasoning, etc.)' },
   { name: 'skills',  desc: 'List and manage skills' },
   { name: 'compact', desc: 'Summarize and compress conversation history to save tokens' },
+  { name: 'memory',  desc: 'Show persistent memory entries and last session summary' },
   { name: 'review',  desc: 'Review session changes for logic issues' },
   { name: 'clear',   desc: 'Clear conversation context' },
   { name: 'cost',    desc: 'Show session token usage and cost' },
@@ -65,7 +67,7 @@ export async function handleSlashCommand(
       return { type: 'clear' };
 
     case 'compact':
-      await compactContext(context, config, provider);
+      await compactContext(context, config, provider, cwd);
       return { type: 'handled' };
 
     case 'init':
@@ -100,6 +102,10 @@ export async function handleSlashCommand(
 
     case 'review':
       await reviewContext(context, config, provider);
+      return { type: 'handled' };
+
+    case 'memory':
+      await handleMemoryCommand(rest, cwd);
       return { type: 'handled' };
 
     default: {
@@ -140,6 +146,8 @@ ${chalk.bold('Slash Commands')}
   ${chalk.cyan('/help')}              Show this help message
   ${chalk.cyan('/clear')}             Clear conversation context
   ${chalk.cyan('/compact')}           Summarize and compress conversation history to save tokens
+  ${chalk.cyan('/memory')}            Show persistent memory entries and last session summary
+  ${chalk.cyan('/memory delete <id>')} Delete a memory entry by id
 ${skillsSection}
 ${chalk.bold('@ References')}
 
@@ -510,6 +518,7 @@ async function compactContext(
   context: ContextManager,
   config: CodeGruntConfig,
   provider: LLMProvider,
+  cwd: string,
 ): Promise<void> {
   const messages = context.getMessages();
   const nonSystem = messages.filter((m) => m.role !== 'system');
@@ -574,6 +583,7 @@ async function compactContext(
   }
 
   context.compact(summary.trim());
+  saveSessionSummary(cwd, summary.trim()).catch(() => {});
 
   const afterMessages = context.getMessages().length;
   const afterTokens = context.estimatedTokenCount();
@@ -581,6 +591,48 @@ async function compactContext(
     chalk.green('✓ Context compacted') +
     chalk.gray(`  ${beforeMessages} → ${afterMessages} messages  (~${beforeTokens.toLocaleString()} → ~${afterTokens.toLocaleString()} tokens)`),
   );
+}
+
+// ── /memory ──────────────────────────────────────────────────────────────────
+
+async function handleMemoryCommand(rest: string[], cwd: string): Promise<void> {
+  const sub = rest[0]?.toLowerCase();
+
+  if (sub === 'delete' && rest[1]) {
+    const deleted = await deleteEntry(rest[1]);
+    if (deleted) {
+      console.log(chalk.green(`✓ Deleted memory entry ${rest[1]}`));
+    } else {
+      console.log(chalk.yellow(`Entry "${rest[1]}" not found.`));
+    }
+    return;
+  }
+
+  const [summary, entries] = await Promise.all([
+    loadSessionSummary(cwd),
+    listEntries(),
+  ]);
+
+  if (summary) {
+    console.log(`\n${chalk.bold('Last Session Summary')}\n`);
+    console.log(chalk.gray(summary));
+  } else {
+    console.log(chalk.gray('\nNo session summary saved yet. Run /compact to create one.'));
+  }
+
+  if (entries.length > 0) {
+    console.log(`\n${chalk.bold('Memory Entries')}\n`);
+    for (const e of entries) {
+      console.log(`  ${chalk.cyan(`[${e.id}]`)} ${chalk.bold(e.name)} ${chalk.gray(`(${e.type})`)}`);
+      console.log(`  ${chalk.gray(e.description)}`);
+      const preview = e.body.length > 120 ? e.body.slice(0, 120) + '…' : e.body;
+      console.log(`  ${preview}\n`);
+    }
+    console.log(chalk.gray('  /memory delete <id>   to remove an entry'));
+  } else {
+    console.log(chalk.gray('\nNo memory entries. Ask the agent to remember something using memory_write.'));
+  }
+  console.log('');
 }
 
 // ── /skills ─────────────────────────────────────────────────────────────────
