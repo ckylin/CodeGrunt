@@ -112,3 +112,68 @@ Runtime config via env vars or `~/.codegrunt/config.json`:
 - `CODEGRUNT_PRESENCE_PENALTY` — topic diversity penalty (default: `0`)
 
 Config file is created on first run via the setup wizard (`src/cli/setup.ts`). Env vars take precedence over the config file.
+
+---
+
+## Known Issues & Technical Debt
+
+### Medium severity — affect correctness
+
+| Issue | Location | Detail |
+|---|---|---|
+| ~~`systemPromptOverride` silently ignored~~ | ~~`loop.ts:352`, `prepare-context.ts`~~ | **Fixed** — `PipelineContext.systemPromptOverride` added; `PrepareContextStage` applies it each turn |
+| ~~`edit_file` replaces only first occurrence~~ | ~~`src/core/tools/edit_file.ts:47`~~ | **Fixed** — errors on ambiguous multi-match; `applyEdit` in `confirm.ts` updated too |
+| ~~Auto-compact never triggers~~ | ~~`src/core/context/manager.ts`, `compact.ts`~~ | **Fixed** — `needsCompact` flag set at 80% budget; `runAgentLoop` compacts before each turn |
+
+### Low severity — dead code / duplication
+
+| Issue | Location |
+|---|---|
+| ~~`executor.ts` vs `process-tools-helpers.ts` near-duplicate~~ | **Fixed** — `executor.ts` deleted |
+| `classifier.ts` (`is_code_request`) unused in production | Only referenced in `tests/pipeline/classifier.test.ts` |
+| `ServiceContainer` / DI system fully built but never wired | `src/core/di/container.ts` — all service wiring is still done manually |
+| `ConversationTrimmedEvent` never emitted | `src/core/events/bus.ts` |
+| ~~`detectSystemLanguage()` duplicated~~ | **Fixed** — extracted to `src/utils/locale.ts` |
+| `showSlashCommandSelector` dead stub | `src/cli/input.ts:51` |
+| `ignore` package imported in `package.json` but never used | — |
+
+### Test coverage gaps ✅ Addressed
+
+| Test file | Coverage |
+|---|---|
+| `tests/tools/edit_file.test.ts` | unique match, not-found error, ambiguous multi-occurrence, `_originalContent` fast path |
+| `tests/context/context_manager.test.ts` | push/clear, compact() with/without system msg, needsCompact flag, setTokenBudget trim, tool-call pairing preservation |
+| `tests/pipeline/engine.test.ts` | stage sequencing, `done`/`continue` early-stop, userRejected propagation, error capture, abort signal, lifecycle hooks |
+| `tests/agent/intentor_planner.test.ts` | heuristic coding/chat/zh classification, skill keyword matching, LLM JSON parse, plan normalization, provider error fallback |
+
+Still not tested: `list_directory`, `search_files`, all 4 pipeline stages individually, `compact.ts` chunking logic, `at-resolver.ts`, `skills.ts` zip install.
+
+---
+
+## Priority Work Items
+
+Ordered by impact / blocking risk:
+
+### P0 — Correctness bugs ✅ Done
+
+1. ~~**Fix `systemPromptOverride` in `PrepareContextStage`**~~ — done
+2. ~~**Fix `edit_file` multi-occurrence behavior**~~ — done
+
+### P1 — Core feature completeness ✅ Done
+
+3. ~~**Wire auto-compact into `ContextManager`**~~ — done: `needsCompact` flag at 80% budget, compacted in `runAgentLoop` before each turn
+4. ~~**Remove `executor.ts` dead code**~~ — done: file deleted
+5. ~~**De-duplicate `detectSystemLanguage()`**~~ — done: extracted to `src/utils/locale.ts`
+
+### P2 — Test coverage
+
+6. **`edit_file` unit tests** — unique match, no-match error, multi-occurrence behavior
+7. **`ContextManager` tests** — trim pairing preservation, compact summary, budget enforcement
+8. **`Intentor` + `Planner` tests** — intent classification, plan parsing fallback
+9. **Pipeline stage integration test** — end-to-end stage sequencing with mock provider
+
+### P3 — Cleanup
+
+10. Remove dead code: `classifier.ts`, `executor.ts`, `showSlashCommandSelector` stub, unused `ignore` dependency
+11. Either wire `ServiceContainer` or remove it — half-built DI is noise
+12. Emit `ConversationTrimmedEvent` from `ContextManager.compact()` for observability
