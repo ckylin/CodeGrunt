@@ -43,6 +43,7 @@ export async function readMultilineInput(
           resolve(result);
         },
       }),
+      { exitOnCtrlC: false },
     );
   });
 }
