@@ -13,7 +13,7 @@ describe('read_file', () => {
   });
 
   afterEach(async () => {
-    await rm(dir, { recursive: true, force: true });
+    await rm(dir, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 });
   });
 
   it('reads a file successfully', async () => {

@@ -13,7 +13,7 @@ describe('edit_file', () => {
   });
 
   afterEach(async () => {
-    await rm(dir, { recursive: true, force: true });
+    await rm(dir, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 });
   });
 
   it('replaces a unique string successfully', async () => {

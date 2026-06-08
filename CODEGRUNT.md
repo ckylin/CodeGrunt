@@ -82,9 +82,9 @@ Implements a **P/G/E (Planner / Generator / Evaluator) + Intentor** architecture
 Intentor uses fast heuristics first (keyword patterns, continuation detection, skill keyword overlap) with LLM fallback only when confidence is low.
 
 **Coding Flow — P/G/E**:
-1. **Planner** (`planner.ts`): Decomposes complex tasks into 2-5 steps with low-temperature JSON output. Skipped for short tasks (≤50 chars) and continuation signals
+1. **Planner** (`planner.ts`): Decomposes complex tasks into 2-5 steps with low-temperature JSON output. Injects the real tool list into the prompt; filters invalid `toolsHint` values post-parse. Skipped for short tasks (≤50 chars) and continuation signals
 2. **Generator**: Pipeline engine executes each step sequentially — now with **inner iteration** (multi-turn tool calls per step, not just 1 turn)
-3. **Evaluator** (`evaluator.ts`): Quality check / plan adherence / hallucination detection. Fails → injects feedback and retries (max 3, up from 2). `pruneRefineMessages()` cleans eval feedback between steps
+3. **Evaluator** (`evaluator.ts`): Quality check / plan adherence / hallucination detection across **14 error patterns**. Auto-runs `tsc --noEmit` on TypeScript projects after any write or edit. Fails → injects feedback and retries (max 3). After 3 failed retries the user is prompted rather than silently continuing. `pruneRefineMessages()` cleans eval feedback between steps
 4. `sessionHasRead` tracking prevents redundant file reads across turns
 
 **Chat Flow**: Skips Planner/Evaluator, uses Generator pipeline iteratively (up to 30 iterations). Prints fallback text if model returns empty.
@@ -109,24 +109,26 @@ Manages conversation message array with a **token budget**. When the budget is e
 - `CONTEXT_BUDGET` — for reasoner models (larger)
 - `CHAT_CONTEXT_BUDGET` — for standard chat models (smaller)
 
+**Compaction** triggers at **50%** of the token budget (previously 80%), or when the conversation exceeds **30 non-system messages**. Compaction keeps the **15 most recent messages** (was 6) and generates a summary of up to **1500 tokens** (was 512).
+
 **`project-guide.ts`** — Scans for `CODEGRUNT.md` or `CLAUDE.md` in the working directory and injects it into the system prompt as codebase-level context.
 
 ### Tool System (`src/core/tools/`)
 
-Six built-in tools with plugin-style `ToolRegistry` (supports runtime add/remove):
+Eight built-in tools:
 
-| Tool | File | Destructive? |
-|---|---|---|
-| `read_file` | `read_file.ts` | No |
-| `write_file` | `write_file.ts` | **Yes** — diff preview + confirm |
-| `edit_file` | `edit_file.ts` | **Yes** — diff preview + confirm |
-| `execute_shell` | `execute_shell.ts` | **Yes** — confirm |
-| `list_directory` | `list_directory.ts` | No |
-| `search_files` | `search_files.ts` | No |
+| Tool | File | Destructive? | Notes |
+|---|---|---|---|
+| `read_file` | `read_file.ts` | No | Optional `start_line`/`end_line` for range reading; 100 KB limit; files >100 KB show line count + instructions |
+| `write_file` | `write_file.ts` | **Yes** — diff preview + confirm | |
+| `edit_file` | `edit_file.ts` | **Yes** — diff preview + confirm | |
+| `execute_shell` | `execute_shell.ts` | **Yes** — confirm | `timeout_ms` capped at 300 s (5 min); reports bytes captured on timeout |
+| `list_directory` | `list_directory.ts` | No | Default 500 entries (was 200); `max_entries` param up to 2000 |
+| `search_files` | `search_files.ts` | No | New `is_regex: boolean` and `include_hidden: boolean` params |
+| `memory_write` | `memory.ts` | No | Writes to the agent's persistent memory store |
+| `memory_read` | `memory.ts` | No | Reads from the agent's persistent memory store |
 
-**`registry.ts`** — Tool definitions (name, description, JSON Schema parameters) mapped to implementations. This is what gets sent to the LLM as available functions.
-
-**`executor.ts`** — Dispatches tool calls. For destructive operations, computes a diff (using the `diff` npm package) and calls `confirm()` from `utils/confirm.ts` before applying.
+**`registry.ts`** — Tool definitions (name, description, JSON Schema parameters) mapped to implementations. This is what gets sent to the LLM as available functions. External callers use `getToolDefinitions()` and `getToolByName()` only; `ToolRegistry` is no longer a public export.
 
 ### Provider System (`src/providers/`)
 
@@ -141,10 +143,11 @@ interface LLMProvider {
 
 **DeepSeek provider** (`deepseek/provider.ts`, `deepseek/client.ts`) wraps the `openai` npm package pointed at DeepSeek's API base URL. It handles:
 - Stream mode with tool call delta accumulation
-- Reasoning content extraction (for reasoner models)
-- Token usage tracking per request
+- Reasoning content extraction (for reasoner models); `reasoning_content` is only included for the last assistant message, not the full history, to reduce prompt size
+- Token usage tracking per request via `src/core/usage.ts`
+- **Exponential backoff retry**: up to 3 retries on 429, 5xx, or `ECONNRESET` errors, with delays of 1 s → 2 s → 4 s
 
-### Observability (`src/core/observability/`)
+**Observability** (`src/core/observability/`)
 
 **Logger v2** (`logger.ts`):
 - **File transport**: Structured JSONL logs written to `~/.codegrunt/logs/`
@@ -156,7 +159,7 @@ interface LLMProvider {
 
 **EventBus** (`src/core/events/bus.ts`): Typed event bus covering pipeline/tool/LLM/conversation lifecycle events.
 
-**DI Container** (`src/core/di/container.ts`): Service container with singleton and transient lifecycles.
+**Usage tracking** (`src/core/usage.ts`): Shared token usage module (`addUsage`, `getSessionUsage`, `getLastCallUsage`). Decoupled from both the provider and pipeline stages to avoid circular imports. `stream-response.ts` forwards real cache hit/miss token counts here.
 
 ### Utilities (`src/utils/`)
 
@@ -164,6 +167,7 @@ interface LLMProvider {
 - **`confirm.ts`** — Interactive yes/no prompt for destructive operations with diff preview
 - **`display.ts`** — Markdown rendering in terminal, error formatting, diff display, plan/step/evaluation output
 - **`interrupt.ts`** — Creates `AbortController` for Ctrl+C handling in both REPL and one-shot modes
+- **`locale.ts`** — `detectSystemLanguage()` helper (extracted to avoid duplication)
 - **`markdown.ts`** — Streaming Markdown-to-terminal renderer
 - **`select.ts`** — Interactive list selector with arrow-key navigation
 - **`constants.ts`** — Shared constants (accent color, etc.)
@@ -227,7 +231,7 @@ The Intentor automatically matches tasks to skills using keyword overlap (≥40%
 
 ### Continuation Detection
 
-Short imperative phrases like "继续", "go on", "next" are detected by the Intentor and default to the coding path with `needsFullPlan: false`, skipping the Planner.
+Short imperative phrases like "继续", "go on", "next" are detected by the Intentor and default to the coding path, skipping the Planner.
 
 ---
 
