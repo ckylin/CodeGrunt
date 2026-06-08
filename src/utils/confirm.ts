@@ -66,6 +66,20 @@ export async function confirmEdit(
   return { choice, originalContent: oldContent };
 }
 
+/**
+ * Simple yes/no confirmation prompt using the list picker UI.
+ * Returns true if the user chose yes, false for no or cancelled.
+ */
+export async function confirmYesNo(prompt: string): Promise<boolean> {
+  process.stdout.write('\n' + chalk.yellow(prompt) + '\n');
+  const items = [
+    { value: 'no', label: 'No — 放弃' },
+    { value: 'yes', label: 'Yes — 继续' },
+  ];
+  const selected = await selectFromList('', items);
+  return selected === 'yes';
+}
+
 export function applyEdit(original: string, oldString: string, newString: string): string | null {
   if (!original.includes(oldString)) return null;
   // Reject ambiguous edits — old_string must appear exactly once so the replacement

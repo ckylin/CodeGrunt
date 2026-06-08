@@ -11,8 +11,6 @@ export interface InputResult {
   cancelled: boolean;
 }
 
-export type SlashCommandKind = 'builtin' | 'skill';
-
 export async function readMultilineInput(
   cwd = process.cwd(),
   model?: string,
@@ -46,9 +44,4 @@ export async function readMultilineInput(
       { exitOnCtrlC: false },
     );
   });
-}
-
-// Kept for any external callers — no longer used internally
-export async function showSlashCommandSelector(_skills: Skill[] = []): Promise<string | null> {
-  return null;
 }

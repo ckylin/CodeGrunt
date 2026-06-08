@@ -169,7 +169,7 @@ describe('PipelineBuilder', () => {
   it('builds a pipeline with the given name and stages', () => {
     const s1 = makeStage('s1', { continue: true, done: false });
     const s2 = makeStage('s2', { continue: true, done: false });
-    const pipeline = new PipelineBuilder().name('my-pipe').addStages([s1, s2]).build();
+    const pipeline = new PipelineBuilder().name('my-pipe').addStage(s1).addStage(s2).build();
     expect(pipeline.name).toBe('my-pipe');
     expect(pipeline.stages).toHaveLength(2);
     expect(pipeline.stages[0].name).toBe('s1');

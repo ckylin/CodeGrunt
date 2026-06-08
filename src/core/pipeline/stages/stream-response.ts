@@ -9,6 +9,7 @@ import type { Stage, StageResult, PipelineContext, StreamEmitter } from '../type
 import { getLogger } from '../../observability/logger.js';
 import { getDefaultEventBus, type LLMRequestEvent, type LLMUsageEvent } from '../../events/bus.js';
 import { getDefaultMetrics } from '../../observability/metrics.js';
+import { getLastCallUsage } from '../../usage.js';
 
 const log = getLogger('stage:stream-response');
 
@@ -154,14 +155,16 @@ export class StreamResponseStage implements Stage {
       throw err;
     }
 
-    // Emit usage event (from DeepSeek provider's internal tracking)
+    // Emit usage event — real cache hit/miss data comes from the provider's
+    // per-call snapshot, updated by addUsage() during the stream's final chunk.
+    const callUsage = getLastCallUsage();
     bus.emit({
       type: 'llm:usage',
       model: ctx.config.model,
-      inputTokens: estimatedTokens, // approximate
-      outputTokens: ctx.outputTokens,
-      cacheHitTokens: 0,
-      cacheMissTokens: 0,
+      inputTokens: callUsage.inputTokens > 0 ? callUsage.inputTokens : estimatedTokens,
+      outputTokens: callUsage.outputTokens > 0 ? callUsage.outputTokens : ctx.outputTokens,
+      cacheHitTokens: callUsage.cacheHitTokens,
+      cacheMissTokens: callUsage.cacheMissTokens,
       costUsd: 0,
       timestamp: Date.now(),
     } as LLMUsageEvent);

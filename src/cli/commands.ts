@@ -2,7 +2,7 @@ import chalk from 'chalk';
 import type { LLMProvider, Message, CodeGruntConfig } from '../types.js';
 import type { ContextManager } from '../core/context/manager.js';
 import { DEEPSEEK_MODELS } from './setup.js';
-import { getSessionUsage } from '../core/agent/loop.js';
+import { getSessionUsage } from '../core/usage.js';
 import { printBalanceAndUsage, formatDualCurrency, PRICING } from '../utils/billing.js';
 import type { Skill } from './skills.js';
 import { getGlobalSkillsDir, createSkill } from './skills.js';

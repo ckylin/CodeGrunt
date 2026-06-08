@@ -2,9 +2,10 @@
 // Pure structural evaluation — no LLM call.
 //
 // Checks:
-//   1. Tool errors: any tool result starting with "Error:" or "Failed" → fail
+//   1. Tool errors: any tool result matching known error patterns → fail
 //   2. Empty response: no tool calls AND no text output → fail
 //   3. Blind write: write/edit without a prior read this session → warning only
+//   4. TypeScript typecheck: if write/edit occurred and tsconfig.json exists → run tsc
 //
 // Rationale: LLM-based evaluation was too expensive (one extra call per step)
 // and too inconsistent (same model evaluating its own output). Structural
@@ -15,8 +16,51 @@ import type { PlanStep, EvaluationResult } from '../pipeline/types.js';
 import { WRITE_TOOL_NAMES } from '../pipeline/types.js';
 import { getLogger } from '../observability/logger.js';
 import { getDefaultMetrics } from '../observability/metrics.js';
+import { exec } from 'child_process';
+import { existsSync } from 'fs';
+import path from 'path';
 
 const log = getLogger('evaluator');
+
+// ── Error patterns for tool result content ────────────────────────────────
+
+const ERROR_PATTERNS = [
+  /^Error:/,
+  /^Failed/,
+  /Command exited with code [1-9]/,
+  /Command timed out/,
+  /ENOENT/,
+  /EACCES/,
+  /EPERM/,
+  /Permission denied/,
+  /Cannot find module/,
+  /SyntaxError:/,
+  /TypeError:/,
+  /is not a function/,
+  /undefined is not/,
+  /\[no changes\]/,
+];
+
+// ── TypeScript typecheck helper ───────────────────────────────────────────
+
+function runTsc(cwd: string): Promise<{ exitCode: number; output: string }> {
+  return new Promise(resolve => {
+    const timer = setTimeout(() => {
+      child.kill();
+      resolve({ exitCode: -1, output: '' });
+    }, 15000);
+
+    const child = exec(
+      'npx tsc --noEmit --skipLibCheck 2>&1',
+      { cwd, windowsHide: true },
+      (err, stdout) => {
+        clearTimeout(timer);
+        const exitCode = err?.code ?? 0;
+        resolve({ exitCode: typeof exitCode === 'number' ? exitCode : (err ? 1 : 0), output: stdout });
+      },
+    );
+  });
+}
 
 // ── Structural checks ─────────────────────────────────────────────────────
 
@@ -33,9 +77,12 @@ function structuralChecks(
   let score = 90;
 
   // Check 1: Tool result errors — real failure, retry makes sense
-  const hasToolError = currentTurnToolResults.some(tr => /^Error:|^Failed/.test(tr.content));
-  if (hasToolError) {
-    issues.push('工具调用返回了错误');
+  const errorMatch = currentTurnToolResults.find(tr =>
+    ERROR_PATTERNS.some(p => p.test(tr.content))
+  );
+  if (errorMatch) {
+    const snippet = errorMatch.content.slice(0, 120).replace(/\n/g, ' ');
+    issues.push(`工具调用返回了错误: ${snippet}`);
     suggestions.push('检查工具参数是否正确，文件路径是否存在');
     passed = false;
     requiresRetry = true;
@@ -82,6 +129,8 @@ export interface EvaluateStepInput {
   /** Tool results from this generator turn */
   currentTurnToolResults: Array<{ content: string }>;
   language: 'zh' | 'en';
+  /** Working directory — used for TypeScript typecheck after write/edit */
+  cwd?: string;
   signal?: AbortSignal;
 }
 
@@ -94,13 +143,39 @@ export async function evaluateStep(
   _model: string,
   input: EvaluateStepInput,
 ): Promise<EvaluationResult> {
-  const { planStep, assistantText, sessionHasRead, currentTurnToolCalls, currentTurnToolResults } = input;
+  const { planStep, assistantText, sessionHasRead, currentTurnToolCalls, currentTurnToolResults, cwd } = input;
   const metrics = getDefaultMetrics();
   const evalTimer = metrics.startTimer('evaluator.duration');
 
   log.info('Evaluating step (structural)', { stepId: planStep.id, description: planStep.description });
 
   const result = structuralChecks(currentTurnToolCalls, currentTurnToolResults, sessionHasRead, assistantText);
+
+  // Check 4: TypeScript typecheck — run tsc after write/edit if tsconfig.json exists
+  // Skip if structural checks already require a retry (no point typechecking broken output)
+  if (!result.requiresRetry && cwd) {
+    const hasWriteOrEdit = currentTurnToolCalls.some(tc =>
+      tc.name === 'write_file' || tc.name === 'edit_file'
+    );
+    if (hasWriteOrEdit) {
+      const tsconfigPath = path.join(cwd, 'tsconfig.json');
+      if (existsSync(tsconfigPath)) {
+        try {
+          const { exitCode, output } = await runTsc(cwd);
+          if (exitCode !== 0 && exitCode !== -1 && output.trim()) {
+            const snippet = output.trim().slice(0, 800);
+            result.issues.push(`TypeScript errors detected: ${snippet}`);
+            result.suggestions.push('Fix the TypeScript errors before continuing');
+            result.passed = false;
+            result.requiresRetry = true;
+            result.score = Math.max(0, result.score - 30);
+          }
+        } catch {
+          // tsc not found or unexpected error — silently skip
+        }
+      }
+    }
+  }
 
   evalTimer();
   metrics.increment('evaluator.calls');

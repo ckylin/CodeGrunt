@@ -2,7 +2,7 @@ import { readdir } from 'fs/promises';
 import { join, resolve, relative } from 'path';
 import type { Tool, ToolResult } from '../../types.js';
 
-const MAX_ENTRIES = 200;
+const MAX_ENTRIES = 500;
 const CONCURRENCY = 20; // parallel directory reads
 const SKIP_DIRS = new Set(['node_modules', '.git', 'dist', '.next', '__pycache__', '.cache']);
 
@@ -11,7 +11,7 @@ export const listDirectoryTool: Tool = {
     type: 'function',
     function: {
       name: 'list_directory',
-      description: 'List files and directories in a path. Returns a tree-like structure.',
+      description: 'List files and directories in a path. Returns a tree-like structure. Shows up to 500 entries by default; use max_entries (up to 2000) for larger projects.',
       parameters: {
         type: 'object',
         properties: {
@@ -23,6 +23,10 @@ export const listDirectoryTool: Tool = {
             type: 'number',
             description: 'Maximum depth to recurse (default: 2)',
           },
+          max_entries: {
+            type: 'number',
+            description: 'Maximum number of entries to return (default: 500, max: 2000)',
+          },
         },
         required: [],
       },
@@ -32,6 +36,7 @@ export const listDirectoryTool: Tool = {
   async execute(args): Promise<ToolResult> {
     const dirPath = resolve((args.path as string | undefined) ?? '.');
     const maxDepth = (args.depth as number | undefined) ?? 2;
+    const effectiveLimit = Math.min((args.max_entries as number | undefined) ?? MAX_ENTRIES, 2000);
 
     try {
       // Build a flat list of (depth, name, isDir) tuples using BFS with parallelism
@@ -43,7 +48,7 @@ export const listDirectoryTool: Tool = {
         { absPath: dirPath, depth: 0, relPath: '' },
       ];
 
-      while (queue.length > 0 && allEntries.length < MAX_ENTRIES * 2) {
+      while (queue.length > 0 && allEntries.length < effectiveLimit * 2) {
         const batch = queue.splice(0, CONCURRENCY);
         const dirResults = await Promise.all(
           batch.map(async ({ absPath, depth, relPath }) => {
@@ -96,7 +101,7 @@ export const listDirectoryTool: Tool = {
       // Group and sort: within each parent, dirs first then files, both alphabetically
       const lines: string[] = [];
       for (const entry of allEntries) {
-        if (lines.length >= MAX_ENTRIES) break;
+        if (lines.length >= effectiveLimit) break;
         const indent = '  '.repeat(entry.depth);
         if (entry.isDir) {
           lines.push(`${indent}${entry.name}/`);
@@ -105,9 +110,9 @@ export const listDirectoryTool: Tool = {
         }
       }
 
-      const truncated = allEntries.length > MAX_ENTRIES;
+      const truncated = allEntries.length > effectiveLimit;
       const output = lines.join('\n') +
-        (truncated ? `\n… (${allEntries.length - MAX_ENTRIES} more entries not shown)` : '');
+        (truncated ? `\n… (${allEntries.length - effectiveLimit} more entries not shown)` : '');
 
       return { success: true, output };
     } catch (err) {

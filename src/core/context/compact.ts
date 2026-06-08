@@ -19,9 +19,9 @@ import type { LLMProvider, Message, StreamChunk } from '../../types.js';
 
 const CHARS_PER_TOKEN = 4;
 const CHUNK_TOKENS = 6_000;        // max tokens per chunk
-const CHUNK_SUMMARY_TOKENS = 300;  // max tokens for each chunk summary
-const FINAL_SUMMARY_TOKENS = 512;  // max tokens for merged final summary
-const KEEP_RECENT = 6;             // keep last N messages uncompressed
+const CHUNK_SUMMARY_TOKENS = 400;  // max tokens for each chunk summary
+const FINAL_SUMMARY_TOKENS = 1500; // max tokens for merged final summary
+const KEEP_RECENT = 15;            // keep last N messages uncompressed
 const MIN_MESSAGES = 4;            // minimum non-system messages before compacting
 
 // ── Message formatting ──────────────────────────────────────────────────────

@@ -3,13 +3,98 @@ import type { LLMProvider, Message, RequestOptions, StreamChunk, ToolDefinition,
 import { createOpenAIClient } from './client.js';
 import type { CodeGruntConfig } from '../../types.js';
 import chalk from 'chalk';
-import { addUsage } from '../../core/agent/loop.js';
+import { addUsage } from '../../core/usage.js';
 import { recordUsage } from '../../utils/billing.js';
 
 interface AccumulatedToolCall {
   id: string;
   name: string;
   arguments: string;
+}
+
+const RETRYABLE_STATUS = new Set([429, 500, 502, 503, 504]);
+const RETRYABLE_CODES = new Set(['ECONNRESET', 'ETIMEDOUT']);
+const NON_RETRYABLE_STATUS = new Set([400, 401, 403, 404]);
+const BASE_DELAY_MS = 1000;
+const MAX_RETRY_AFTER_MS = 60_000;
+
+function getStatusCode(err: unknown): number | undefined {
+  if (err != null && typeof err === 'object' && 'status' in err) {
+    const s = (err as Record<string, unknown>).status;
+    return typeof s === 'number' ? s : undefined;
+  }
+  return undefined;
+}
+
+function getErrorCode(err: unknown): string | undefined {
+  if (err != null && typeof err === 'object' && 'code' in err) {
+    const c = (err as Record<string, unknown>).code;
+    return typeof c === 'string' ? c : undefined;
+  }
+  return undefined;
+}
+
+function getRetryAfterMs(err: unknown): number | undefined {
+  if (err == null || typeof err !== 'object') return undefined;
+  // OpenAI SDK surfaces response headers on the error object
+  const headers = (err as Record<string, unknown>).headers as Record<string, string> | undefined;
+  const value = headers?.['retry-after'] ?? headers?.['Retry-After'];
+  if (!value) return undefined;
+  const seconds = parseFloat(value);
+  return isNaN(seconds) ? undefined : Math.min(seconds * 1000, MAX_RETRY_AFTER_MS);
+}
+
+async function withRetry<T>(fn: () => Promise<T>, signal?: AbortSignal): Promise<T> {
+  const maxRetries = 3;
+  let lastError: unknown;
+
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    if (signal?.aborted) throw new Error('Aborted');
+
+    try {
+      return await fn();
+    } catch (err) {
+      lastError = err;
+
+      const status = getStatusCode(err);
+      const code = getErrorCode(err);
+
+      // Non-retryable HTTP errors — fail immediately
+      if (status !== undefined && NON_RETRYABLE_STATUS.has(status)) {
+        throw err;
+      }
+
+      // Only retry known transient errors
+      const isRetryable =
+        (status !== undefined && RETRYABLE_STATUS.has(status)) ||
+        (code !== undefined && RETRYABLE_CODES.has(code));
+
+      if (!isRetryable || attempt === maxRetries) {
+        throw err;
+      }
+
+      // Determine wait time: retry-after header wins over backoff
+      const retryAfterMs = getRetryAfterMs(err);
+      const backoffMs = BASE_DELAY_MS * Math.pow(2, attempt); // 1s, 2s, 4s
+      const waitMs = retryAfterMs ?? backoffMs;
+      const waitSec = Math.round(waitMs / 1000);
+      const retryNum = attempt + 1;
+
+      process.stderr.write(
+        chalk.gray(`  [retrying API call, attempt ${retryNum}/${maxRetries}, waiting ${waitSec}s...]\n`),
+      );
+
+      await new Promise<void>((resolve, reject) => {
+        const timer = setTimeout(resolve, waitMs);
+        signal?.addEventListener('abort', () => {
+          clearTimeout(timer);
+          reject(new Error('Aborted'));
+        }, { once: true });
+      });
+    }
+  }
+
+  throw lastError;
 }
 
 export class DeepSeekProvider implements LLMProvider {
@@ -21,11 +106,15 @@ export class DeepSeekProvider implements LLMProvider {
   }
 
   async *stream(messages: Message[], options: RequestOptions): AsyncIterable<StreamChunk> {
-    // Convert our Message[] to OpenAI format, preserving reasoning_content
-    const openaiMessages = messages.map(toOpenAIMessage);
+    // Only the last assistant message gets reasoning_content sent back —
+    // re-sending older chain-of-thought would double input token cost.
+    const lastAssistantIdx = messages.reduce((last, m, i) =>
+      m.role === 'assistant' ? i : last, -1);
+    const openaiMessages = messages.map((m, i) =>
+      toOpenAIMessage(m, i === lastAssistantIdx));
     const tools = options.tools?.map(toOpenAITool);
 
-    const stream = await this.client.chat.completions.create({
+    const stream = await withRetry(() => this.client.chat.completions.create({
       model: options.model,
       max_tokens: options.maxTokens,
       // temperature is intentionally undefined for reasoner models
@@ -43,7 +132,7 @@ export class DeepSeekProvider implements LLMProvider {
       tool_choice: tools && tools.length > 0 ? 'auto' : undefined,
       stream: true,
       stream_options: { include_usage: true },
-    }, { signal: options.signal });
+    }, { signal: options.signal }), options.signal);
 
     const accumulator = new Map<number, AccumulatedToolCall>();
 
@@ -97,8 +186,9 @@ export class DeepSeekProvider implements LLMProvider {
   }
 }
 
-/** Serialize our internal Message to OpenAI-compatible format, preserving reasoning_content */
-function toOpenAIMessage(msg: Message): OpenAI.Chat.ChatCompletionMessageParam {
+/** Serialize our internal Message to OpenAI-compatible format.
+ *  Only includes reasoning_content when includeReasoning is true (last assistant message only). */
+function toOpenAIMessage(msg: Message, includeReasoning = false): OpenAI.Chat.ChatCompletionMessageParam {
   if (msg.role === 'tool') {
     return {
       role: 'tool',
@@ -120,8 +210,8 @@ function toOpenAIMessage(msg: Message): OpenAI.Chat.ChatCompletionMessageParam {
           arguments: tc.function.arguments,
         },
       })),
-      // Preserve reasoning_content so the model sees its own chain of thought
-      ...(tcMsg.reasoning_content ? { reasoning_content: tcMsg.reasoning_content } as Record<string, unknown> : {}),
+      // Only send reasoning_content back for the last assistant message
+      ...(includeReasoning && tcMsg.reasoning_content ? { reasoning_content: tcMsg.reasoning_content } as Record<string, unknown> : {}),
     } as unknown as OpenAI.Chat.ChatCompletionMessageParam;
   }
 
@@ -130,8 +220,8 @@ function toOpenAIMessage(msg: Message): OpenAI.Chat.ChatCompletionMessageParam {
   return {
     role: textMsg.role as 'system' | 'user' | 'assistant',
     content: textMsg.content,
-    // Preserve reasoning_content in assistant messages for multi-turn continuity
-    ...(textMsg.role === 'assistant' && textMsg.reasoning_content
+    // Preserve reasoning_content in last assistant message only
+    ...(includeReasoning && textMsg.role === 'assistant' && textMsg.reasoning_content
       ? { reasoning_content: textMsg.reasoning_content } as Record<string, unknown>
       : {}),
   } as OpenAI.Chat.ChatCompletionMessageParam;

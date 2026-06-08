@@ -72,14 +72,6 @@ export function createToolSpinner(name: string, args: Record<string, unknown>): 
   };
 }
 
-export function printUserMessage(text: string): void {
-  process.stdout.write('\n  ' + blue('You') + '\n');
-  for (const line of text.split('\n')) {
-    process.stdout.write('  ' + chalk.white(line) + '\n');
-  }
-  process.stdout.write('\n');
-}
-
 export function printAssistantHeader(): void {
   // Silent by default — the separator line is visual noise.
   // Enable CODEGRUNT_VERBOSE to see the header.
@@ -101,14 +93,6 @@ export function printThinkingCollapsed(reasoningText: string, elapsedMs: number)
 
 export function printError(message: string): void {
   process.stderr.write(danger('  error  ') + message + '\n');
-}
-
-export function printInfo(message: string): void {
-  process.stdout.write(muted('  ' + message) + '\n');
-}
-
-export function printDivider(): void {
-  process.stdout.write(muted('-'.repeat(process.stdout.columns || 80)) + '\n');
 }
 
 // ── P/G/E Plan & Evaluation Display ─────────────────────────────────────

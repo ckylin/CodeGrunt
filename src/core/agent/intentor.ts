@@ -65,7 +65,7 @@ function heuristicClassify(task: string): IntentResult | null {
       isCoding: true,
       confidence: Math.min(95, 60 + codingScore * 10),
       reason: 'coding keywords detected',
-      needsFullPlan: true,
+      
     };
   }
 
@@ -75,7 +75,7 @@ function heuristicClassify(task: string): IntentResult | null {
       isCoding: false,
       confidence: Math.min(90, 55 + nonCodingScore * 10),
       reason: 'conversational/explanatory intent',
-      needsFullPlan: false,
+      
     };
   }
 
@@ -85,7 +85,7 @@ function heuristicClassify(task: string): IntentResult | null {
       isCoding: true,
       confidence: 55,
       reason: 'weak coding signal',
-      needsFullPlan: true,
+      
     };
   }
 
@@ -211,7 +211,7 @@ function parseIntentResult(raw: string, fallback: boolean, skills: Skill[]): Int
         isCoding: Boolean(parsed.isCoding),
         confidence: Math.max(0, Math.min(100, Number(parsed.confidence) || 70)),
         reason: String(parsed.reason ?? ''),
-        needsFullPlan: Boolean(parsed.isCoding),
+        
         matchedSkill,
       };
     } catch { /* fall through */ }
@@ -221,7 +221,7 @@ function parseIntentResult(raw: string, fallback: boolean, skills: Skill[]): Int
     isCoding: fallback,
     confidence: 50,
     reason: 'classification uncertain',
-    needsFullPlan: fallback,
+    
   };
 }
 
@@ -270,7 +270,7 @@ export async function detectIntent(
       isCoding: false,
       confidence: 85,
       reason: `matched skill: ${skillMatch.name}`,
-      needsFullPlan: false,
+      
       matchedSkill: { name: skillMatch.name, content: skillMatch.content, system: skillMatch.system },
     };
   }
@@ -326,7 +326,7 @@ export async function detectIntent(
       isCoding: true,
       confidence: 50,
       reason: 'classification failed — defaulting to coding path',
-      needsFullPlan: true,
+      
     };
   }
 }

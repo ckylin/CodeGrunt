@@ -17,12 +17,13 @@ import type { TaskPlan, PlanStep } from '../pipeline/types.js';
 import { getLogger } from '../observability/logger.js';
 import { getDefaultMetrics } from '../observability/metrics.js';
 import { getDefaultEventBus, type LLMRequestEvent } from '../events/bus.js';
+import { getToolDefinitions } from '../tools/registry.js';
 
 const log = getLogger('planner');
 
 // ── Planner System Prompt (DeepSeek-optimized) ───────────────────────────
 
-function buildPlannerPrompt(language: 'zh' | 'en', task: string): string {
+function buildPlannerPrompt(language: 'zh' | 'en', task: string, availableTools: string): string {
   const formatInstruction = language === 'zh'
     ? `你是一个任务规划专家。分析用户的任务，将其分解为 2-5 个可独立验证的执行步骤。
 
@@ -55,6 +56,11 @@ function buildPlannerPrompt(language: 'zh' | 'en', task: string): string {
 6. 如果任务很简单（单文件修改），1-2 步即可
 7. **"更新多个文件"类任务**：按文件分步（每步读+写一个文件），不要按"分析→执行"分步。分析阶段会消耗大量 token，导致执行阶段上下文不足。
 8. **每个写入步骤**必须在同一步内完成读取和写入，不要把读取和写入拆成两步。
+
+## 可用工具
+${availableTools}
+
+toolsHint 只能使用上面列出的工具名。
 
 ## 用户任务
 ${task}`
@@ -90,6 +96,11 @@ Place your plan in a JSON code block:
 7. **"Update multiple files" tasks**: split by file (each step reads+writes one file). Do NOT split into "analyze then execute" — analysis consumes too many tokens, leaving no context for writing.
 8. **Each write step** must include both reading and writing in the same step.
 
+## Available Tools
+${availableTools}
+
+toolsHint must only use tool names from the list above.
+
 ## User Task
 ${task}`;
 
@@ -108,20 +119,28 @@ function extractJsonBlock(text: string): string | null {
   return null;
 }
 
-function parsePlan(raw: string, task: string): TaskPlan {
+function parsePlan(raw: string, task: string, validToolNames: Set<string>): TaskPlan {
   const jsonStr = extractJsonBlock(raw);
   if (jsonStr) {
     try {
       const parsed = JSON.parse(jsonStr) as TaskPlan;
       // Validate structure
       if (parsed.goal && Array.isArray(parsed.steps) && parsed.steps.length > 0) {
-        parsed.steps = parsed.steps.map((s: PlanStep, i: number) => ({
-          id: s.id ?? i + 1,
-          description: String(s.description ?? `Step ${i + 1}`),
-          toolsHint: Array.isArray(s.toolsHint) ? s.toolsHint : [],
-          expectedOutcome: String(s.expectedOutcome ?? 'Complete the step'),
-          verification: String(s.verification ?? 'Step completed'),
-        }));
+        parsed.steps = parsed.steps.map((s: PlanStep, i: number) => {
+          const rawHints = Array.isArray(s.toolsHint) ? s.toolsHint : [];
+          const filteredHints = rawHints.filter((t: string) => validToolNames.has(t));
+          const removed = rawHints.length - filteredHints.length;
+          if (removed > 0) {
+            log.warn('Filtered invalid toolsHint entries', { removed, step: i + 1 });
+          }
+          return {
+            id: s.id ?? i + 1,
+            description: String(s.description ?? `Step ${i + 1}`),
+            toolsHint: filteredHints,
+            expectedOutcome: String(s.expectedOutcome ?? 'Complete the step'),
+            verification: String(s.verification ?? 'Step completed'),
+          };
+        });
         parsed.reasoning = parsed.reasoning ?? '';
         log.info('Plan parsed', { steps: parsed.steps.length, goal: parsed.goal });
         return parsed;
@@ -165,7 +184,12 @@ export async function generatePlan(
 
   log.info('Generating plan', { taskLength: task.length, language });
 
-  const systemPrompt = buildPlannerPrompt(language, task);
+  // Build valid tool names from the registry
+  const toolDefs = getToolDefinitions();
+  const validToolNames = new Set(toolDefs.map(d => d.function.name));
+  const availableTools = Array.from(validToolNames).join(', ');
+
+  const systemPrompt = buildPlannerPrompt(language, task, availableTools);
 
   const messages: Message[] = [
     { role: 'user', content: systemPrompt },
@@ -199,7 +223,7 @@ export async function generatePlan(
 
     planTimer();
     metrics.increment('planner.calls');
-    return parsePlan(fullText, task);
+    return parsePlan(fullText, task, validToolNames);
   } catch (err) {
     planTimer();
     log.error('Plan generation failed', {

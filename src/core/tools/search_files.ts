@@ -29,7 +29,7 @@ const TEXT_EXTS = new Set([
 ]);
 
 /** Stream-search a single file; returns up to maxMatches line snippets. Stops reading as soon as limit is hit. */
-function searchFileStream(absPath: string, pattern: string, relPath: string, maxMatches: number): Promise<string[]> {
+function searchFileStream(absPath: string, pattern: string, relPath: string, maxMatches: number, regex?: RegExp): Promise<string[]> {
   return new Promise((res) => {
     let size = 0;
     try { size = statSync(absPath).size; } catch { res([]); return; }
@@ -43,7 +43,8 @@ function searchFileStream(absPath: string, pattern: string, relPath: string, max
 
     rl.on('line', (line) => {
       lineNo++;
-      if (line.includes(pattern)) {
+      const hit = regex ? regex.test(line) : line.includes(pattern);
+      if (hit) {
         matches.push(`${relPath}:${lineNo}: ${line.trim()}`);
         if (matches.length >= maxMatches) {
           rl.close();
@@ -62,7 +63,7 @@ export const searchFilesTool: Tool = {
     type: 'function',
     function: {
       name: 'search_files',
-      description: 'Search for a pattern in files. Returns matching file paths and line snippets.',
+      description: 'Search for a pattern in files. Returns matching file paths and line snippets. Supports regex search via is_regex:true. Set include_hidden:true to also search files and directories starting with ".".',
       parameters: {
         type: 'object',
         properties: {
@@ -78,6 +79,14 @@ export const searchFilesTool: Tool = {
             type: 'string',
             description: 'Glob-like file extension filter, e.g. ".ts" or ".py" (optional)',
           },
+          is_regex: {
+            type: 'boolean',
+            description: 'If true, treat pattern as a regular expression (default false)',
+          },
+          include_hidden: {
+            type: 'boolean',
+            description: 'If true, include files and directories whose names start with "." (default false)',
+          },
         },
         required: ['pattern'],
       },
@@ -88,9 +97,21 @@ export const searchFilesTool: Tool = {
     const pattern = args.pattern as string;
     const searchPath = resolve((args.path as string | undefined) ?? '.');
     const filePattern = args.file_pattern as string | undefined;
+    const isRegex = !!(args.is_regex as boolean | undefined);
+    const includeHidden = !!(args.include_hidden as boolean | undefined);
 
     if (!pattern) {
       return { success: false, output: '', error: 'Missing required parameter "pattern"' };
+    }
+
+    let regex: RegExp | undefined;
+    if (isRegex) {
+      try {
+        regex = new RegExp(pattern);
+      } catch (e) {
+        const message = e instanceof Error ? e.message : String(e);
+        return { success: false, output: '', error: `Invalid regex pattern: ${message}` };
+      }
     }
 
     const results: string[] = [];
@@ -113,7 +134,7 @@ export const searchFilesTool: Tool = {
             const subdirs: Array<{ root: string; relDir: string }> = [];
             const files: Array<{ root: string; relPath: string }> = [];
             for (const e of entries) {
-              if (e.name.startsWith('.')) continue;
+              if (!includeHidden && e.name.startsWith('.')) continue;
               const rel = join(relDir, e.name);
               if (e.isDirectory()) {
                 if (!SKIP_DIRS.has(e.name)) subdirs.push({ root, relDir: rel });
@@ -145,7 +166,7 @@ export const searchFilesTool: Tool = {
         const batch = fileQueue.splice(0, CONCURRENCY);
         const batchResults = await Promise.all(
           batch.map(({ root, relPath }) =>
-            searchFileStream(join(root, relPath), pattern, relPath, Math.min(3, remaining))
+            searchFileStream(join(root, relPath), pattern, relPath, Math.min(3, remaining), regex)
           )
         );
         for (const matches of batchResults) {

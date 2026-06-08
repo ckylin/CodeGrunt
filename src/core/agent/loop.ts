@@ -26,6 +26,7 @@ import { ContextManager } from '../context/manager.js';
 import { loadProjectGuide } from '../context/project-guide.js';
 import { getToolDefinitions } from '../tools/registry.js';
 import { resetYesAll, isYesAllActive } from '../pipeline/stages/process-tools-helpers.js';
+import { confirmYesNo } from '../../utils/confirm.js';
 import { detectInputLanguage } from '../memory/habits.js';
 import type { TurnSignal } from '../../types.js';
 import {
@@ -67,24 +68,6 @@ const log = getLogger('agent');
 
 const MAX_ITERATIONS = 30;
 const MAX_REFINE_RETRIES = 3;
-
-// ── Cumulative usage tracking (kept for backward compat) ─────────────────
-const sessionUsage = { inputTokens: 0, outputTokens: 0, cacheHitTokens: 0, cacheMissTokens: 0 };
-export function addUsage(u: { inputTokens: number; outputTokens: number; cacheHitTokens: number; cacheMissTokens: number }): void {
-  sessionUsage.inputTokens += u.inputTokens;
-  sessionUsage.outputTokens += u.outputTokens;
-  sessionUsage.cacheHitTokens += u.cacheHitTokens;
-  sessionUsage.cacheMissTokens += u.cacheMissTokens;
-}
-export function getSessionUsage(): typeof sessionUsage {
-  return { ...sessionUsage };
-}
-export function resetSessionUsage(): void {
-  sessionUsage.inputTokens = 0;
-  sessionUsage.outputTokens = 0;
-  sessionUsage.cacheHitTokens = 0;
-  sessionUsage.cacheMissTokens = 0;
-}
 
 // ── UI-aware StreamEmitter ────────────────────────────────────────────────
 
@@ -332,7 +315,7 @@ export async function runAgentLoop(options: AgentRunOptions): Promise<void> {
   try {
     intent = await detectIntent(provider, model, task, lang, signal, options.skills ?? []);
   } catch {
-    intent = { isCoding: true, confidence: 50, reason: 'classification error', needsFullPlan: true };
+    intent = { isCoding: true, confidence: 50, reason: 'classification error'};
   }
 
   printIntentResult(intent);
@@ -572,6 +555,7 @@ async function runCodingFlow(
         currentTurnToolCalls,
         currentTurnToolResults,
         language: lang,
+        cwd: options.cwd,
         signal,
       });
 
@@ -594,10 +578,28 @@ async function runCodingFlow(
         log.info('Refining step', { stepId: step.id, retry: refineCount + 1 });
       } else {
         log.warn('Max retries exhausted for step', { stepId: step.id });
-        process.stdout.write(chalk.yellow(`  ! step ${step.id} max retries, continuing\n`));
         pruneRefineMessages(context);
-        stepPassed = true;
-        finalAssistantText = genResult.pipeCtx.assistantText;
+
+        const issuesSummary = (lastEval?.issues ?? []).join(', ') || (lang === 'zh' ? '未知问题' : 'unknown issues');
+        const stepLabel = lang === 'zh'
+          ? `步骤 ${step.id}/${plan.steps.length} 重试次数耗尽`
+          : `Step ${step.id}/${plan.steps.length} failed after ${MAX_REFINE_RETRIES} retries`;
+        const promptText = lang === 'zh'
+          ? `⚠  ${stepLabel}。\n问题：${issuesSummary}\n是否继续？[y/N]`
+          : `⚠  ${stepLabel}.\nIssues: ${issuesSummary}\nContinue anyway? [y/N]`;
+
+        const wantContinue = await confirmYesNo(promptText);
+        if (wantContinue) {
+          const warningMsg = lang === 'zh'
+            ? `[警告：步骤 ${step.id} 可能未完成 — 用户选择继续]`
+            : `[WARNING: step ${step.id} may be incomplete — continuing at user request]`;
+          context.push({ role: 'user', content: warningMsg });
+          stepPassed = true;
+          finalAssistantText = genResult.pipeCtx.assistantText;
+        } else {
+          userRejected = true;
+          break;
+        }
       }
     }
 

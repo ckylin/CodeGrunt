@@ -19,7 +19,7 @@ const log = getLogger('tools:registry');
 
 // ── Registry ─────────────────────────────────────────────────────────────
 
-export interface ToolRegistration {
+interface ToolRegistration {
   tool: Tool;
   /** When the tool was registered */
   registeredAt: number;
@@ -27,7 +27,7 @@ export interface ToolRegistration {
   source: string;
 }
 
-export class ToolRegistry {
+class ToolRegistry {
   private tools = new Map<string, ToolRegistration>();
 
   constructor() {
@@ -103,17 +103,9 @@ export class ToolRegistry {
 
 let defaultRegistry: ToolRegistry | null = null;
 
-export function getToolRegistry(): ToolRegistry {
+function getToolRegistry(): ToolRegistry {
   if (!defaultRegistry) defaultRegistry = new ToolRegistry();
   return defaultRegistry;
-}
-
-export function resetToolRegistry(): void {
-  defaultRegistry = null;
-}
-
-export function getAllTools(): Tool[] {
-  return getToolRegistry().getAll();
 }
 
 export function getToolDefinitions(): ToolDefinition[] {
