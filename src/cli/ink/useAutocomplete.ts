@@ -7,7 +7,7 @@ import type { DropdownItem } from './types.js';
 const SKIP_DIRS = new Set(['node_modules', '.git', 'dist', '.next', '__pycache__', 'coverage']);
 
 export const SLASH_COMMANDS = [
-  { name: '/init',    desc: 'Analyze codebase and generate SEEK.md' },
+  { name: '/init',    desc: 'Analyze codebase and generate CODEGRUNT.md' },
   { name: '/model',   desc: 'Switch model' },
   { name: '/config',  desc: 'View or change config (temperature, reasoning, etc.)' },
   { name: '/skills',  desc: 'List and manage skills' },

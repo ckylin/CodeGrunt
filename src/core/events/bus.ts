@@ -10,20 +10,6 @@ export type EventHandler<T> = (event: T) => void | Promise<void>;
 
 // ── Event Definitions ──────────────────────────────────────────────────────
 
-export interface PipelineStartedEvent {
-  type: 'pipeline:started';
-  pipelineName: string;
-  timestamp: number;
-}
-
-export interface PipelineFinishedEvent {
-  type: 'pipeline:finished';
-  pipelineName: string;
-  durationMs: number;
-  success: boolean;
-  timestamp: number;
-}
-
 export interface StageStartedEvent {
   type: 'stage:started';
   stageName: string;
@@ -76,13 +62,6 @@ export interface LLMUsageEvent {
   timestamp: number;
 }
 
-export interface UserInputEvent {
-  type: 'user:input';
-  length: number;
-  hasAtRefs: boolean;
-  timestamp: number;
-}
-
 export interface ErrorEvent {
   type: 'error';
   source: string;
@@ -91,31 +70,21 @@ export interface ErrorEvent {
   timestamp: number;
 }
 
-export interface ConversationTrimmedEvent {
-  type: 'conversation:trimmed';
-  removedMessages: number;
-  remainingTokens: number;
-  timestamp: number;
-}
-
 export type CodeGruntEvent =
-  | PipelineStartedEvent
-  | PipelineFinishedEvent
+  | { type: 'pipeline:started'; pipelineName: string; timestamp: number }
+  | { type: 'pipeline:finished'; pipelineName: string; durationMs: number; success: boolean; timestamp: number }
   | StageStartedEvent
   | StageFinishedEvent
   | ToolCallEvent
   | ToolResultEvent
   | LLMRequestEvent
   | LLMUsageEvent
-  | UserInputEvent
-  | ErrorEvent
-  | ConversationTrimmedEvent;
+  | ErrorEvent;
 
 // ── Event Bus ──────────────────────────────────────────────────────────────
 
 export class EventBus {
   private handlers = new Map<string, Set<EventHandler<CodeGruntEvent>>>();
-  private enabled = true;
 
   /** Subscribe to a specific event type */
   on<T extends CodeGruntEvent>(eventType: T['type'], handler: EventHandler<T>): () => void {
@@ -127,37 +96,15 @@ export class EventBus {
     return () => this.handlers.get(key)?.delete(handler as EventHandler<CodeGruntEvent>);
   }
 
-  /** Subscribe to all events (for logging/metrics) */
-  onAny(handler: EventHandler<CodeGruntEvent>): () => void {
-    return this.on('*' as any, handler);
-  }
-
   /** Emit an event to all subscribers */
   emit(event: CodeGruntEvent): void {
-    if (!this.enabled) return;
-
-    // Notify type-specific subscribers
     const handlers = this.handlers.get(event.type);
     if (handlers) {
       for (const h of handlers) {
         try { h(event); } catch { /* don't let one handler break others */ }
       }
     }
-
-    // Notify wildcard subscribers
-    const wildcardHandlers = this.handlers.get('*' as any);
-    if (wildcardHandlers) {
-      for (const h of wildcardHandlers) {
-        try { h(event); } catch { /* swallow */ }
-      }
-    }
   }
-
-  /** Pause event emission */
-  suspend(): void { this.enabled = false; }
-
-  /** Resume event emission */
-  resume(): void { this.enabled = true; }
 
   /** Remove all subscribers */
   clear(): void { this.handlers.clear(); }
@@ -170,8 +117,4 @@ let defaultBus: EventBus | null = null;
 export function getDefaultEventBus(): EventBus {
   if (!defaultBus) defaultBus = new EventBus();
   return defaultBus;
-}
-
-export function resetDefaultEventBus(): void {
-  defaultBus = null;
 }

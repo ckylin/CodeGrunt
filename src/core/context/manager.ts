@@ -1,10 +1,16 @@
 import type { Message } from '../../types.js';
 
 const CHARS_PER_TOKEN = 4;
+// Trigger auto-compact when estimated tokens exceed this fraction of the budget.
+const AUTO_COMPACT_THRESHOLD = 0.50;
+// Also trigger when non-system message count exceeds this number.
+const AUTO_COMPACT_MESSAGE_COUNT = 30;
 
 export class ContextManager {
   private messages: Message[] = [];
   private tokenBudget: number;
+  /** Set to true when the context is near capacity and should be compacted before the next agent turn. */
+  needsCompact = false;
 
   /**
    * @param tokenBudget Maximum estimated tokens for stored messages.
@@ -86,6 +92,15 @@ export class ContextManager {
   }
 
   private trim(): void {
+    const tokens = this.estimateTokens();
+    const nonSystemCount = this.messages.filter(m => m.role !== 'system').length;
+    if (
+      tokens > this.tokenBudget * AUTO_COMPACT_THRESHOLD ||
+      nonSystemCount > AUTO_COMPACT_MESSAGE_COUNT
+    ) {
+      this.needsCompact = true;
+    }
+
     const hasSystem = this.messages[0]?.role === 'system';
     const startIdx = hasSystem ? 1 : 0;
     // Keep system + at least the last 4 messages (user/assistant/tool pairs)

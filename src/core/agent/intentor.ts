@@ -10,6 +10,7 @@
 //
 // Ref: pipeline/types.ts for IntentResult
 
+import chalk from 'chalk';
 import type { LLMProvider, Message } from '../../types.js';
 import type { IntentResult } from '../pipeline/types.js';
 import type { Skill } from '../../cli/skills.js';
@@ -64,7 +65,7 @@ function heuristicClassify(task: string): IntentResult | null {
       isCoding: true,
       confidence: Math.min(95, 60 + codingScore * 10),
       reason: 'coding keywords detected',
-      needsFullPlan: true,
+      
     };
   }
 
@@ -74,7 +75,7 @@ function heuristicClassify(task: string): IntentResult | null {
       isCoding: false,
       confidence: Math.min(90, 55 + nonCodingScore * 10),
       reason: 'conversational/explanatory intent',
-      needsFullPlan: false,
+      
     };
   }
 
@@ -84,7 +85,7 @@ function heuristicClassify(task: string): IntentResult | null {
       isCoding: true,
       confidence: 55,
       reason: 'weak coding signal',
-      needsFullPlan: true,
+      
     };
   }
 
@@ -210,7 +211,7 @@ function parseIntentResult(raw: string, fallback: boolean, skills: Skill[]): Int
         isCoding: Boolean(parsed.isCoding),
         confidence: Math.max(0, Math.min(100, Number(parsed.confidence) || 70)),
         reason: String(parsed.reason ?? ''),
-        needsFullPlan: Boolean(parsed.isCoding),
+        
         matchedSkill,
       };
     } catch { /* fall through */ }
@@ -220,8 +221,25 @@ function parseIntentResult(raw: string, fallback: boolean, skills: Skill[]): Int
     isCoding: fallback,
     confidence: 50,
     reason: 'classification uncertain',
-    needsFullPlan: fallback,
+    
   };
+}
+
+// ── Spinner helpers ──────────────────────────────────────────────────────
+
+function startSpinner(text: string): ReturnType<typeof setInterval> {
+  const frames = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+  let idx = 0;
+  const interval = setInterval(() => {
+    process.stdout.write('\r' + chalk.gray(`${frames[idx]} ${text}`));
+    idx = (idx + 1) % frames.length;
+  }, 80);
+  return interval;
+}
+
+function stopSpinner(interval: ReturnType<typeof setInterval>): void {
+  clearInterval(interval);
+  process.stdout.write('\r' + ' '.repeat(40) + '\r');
 }
 
 // ── Main export ──────────────────────────────────────────────────────────
@@ -252,7 +270,7 @@ export async function detectIntent(
       isCoding: false,
       confidence: 85,
       reason: `matched skill: ${skillMatch.name}`,
-      needsFullPlan: false,
+      
       matchedSkill: { name: skillMatch.name, content: skillMatch.content, system: skillMatch.system },
     };
   }
@@ -274,6 +292,8 @@ export async function detectIntent(
   const prompt = buildIntentorPrompt(language, task, skills);
   const messages: Message[] = [{ role: 'user', content: prompt }];
 
+  const spinner = startSpinner('Classifying intent…');
+
   try {
     let fullText = '';
     const stream = provider.stream(messages, {
@@ -289,12 +309,14 @@ export async function detectIntent(
       else if (chunk.type === 'finish') break;
     }
 
+    stopSpinner(spinner);
     timer();
     metrics.increment('intentor.llm_calls');
     const result = parseIntentResult(fullText, heuristic?.isCoding ?? true, skills);
     log.info('Intent classified by LLM', { isCoding: result.isCoding, confidence: result.confidence, matchedSkill: result.matchedSkill?.name });
     return result;
   } catch (err) {
+    stopSpinner(spinner);
     timer();
     log.warn('Intent LLM call failed, defaulting to coding=true', {
       error: err instanceof Error ? err.message : String(err),
@@ -304,7 +326,7 @@ export async function detectIntent(
       isCoding: true,
       confidence: 50,
       reason: 'classification failed — defaulting to coding path',
-      needsFullPlan: true,
+      
     };
   }
 }

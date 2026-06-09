@@ -110,6 +110,20 @@ export interface CodeGruntConfig {
   presencePenalty?: number;
 }
 
+// ── Habit tracking ──────────────────────────────────────────────────────────
+
+export interface TurnSignal {
+  userInputLength: number;
+  userInputLang: 'zh' | 'en';
+  responseLength: number;
+  isCoding: boolean;
+  toolCallCount: number;
+  confirmations: number;
+  rejections: number;
+  yesAll: boolean;
+  aborted: boolean;
+}
+
 // ── Agent ───────────────────────────────────────────────────────────────────
 
 export interface AgentRunOptions {
@@ -123,8 +137,14 @@ export interface AgentRunOptions {
   systemPromptOverride?: string;
   /** Loaded skills — passed to Intentor for automatic skill routing. */
   skills?: import('./cli/skills.js').Skill[];
+  /** Session summary from previous compact — injected into system prompt at startup. */
+  memorySummary?: string;
+  /** Formatted user habit preferences — injected into system prompt above session summary. */
+  userPreferences?: string;
   onText?: (text: string) => void;
   onToolCall?: (name: string, args: Record<string, unknown>) => void;
   onToolResult?: (name: string, result: ToolResult) => void;
+  /** Called at the end of each agent turn with observable behavior signals for habit tracking. */
+  onTurnComplete?: (signal: TurnSignal) => void;
   signal?: AbortSignal;
 }

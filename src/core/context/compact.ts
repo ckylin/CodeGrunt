@@ -12,15 +12,16 @@
 // Ref: src/providers/deepseek/provider.ts for stream API
 // Ref: src/core/pipeline/stages/prepare-context.ts L103 for reasoner pattern
 
+import chalk from 'chalk';
 import type { LLMProvider, Message, StreamChunk } from '../../types.js';
 
 // ── Constants ───────────────────────────────────────────────────────────────
 
 const CHARS_PER_TOKEN = 4;
 const CHUNK_TOKENS = 6_000;        // max tokens per chunk
-const CHUNK_SUMMARY_TOKENS = 300;  // max tokens for each chunk summary
-const FINAL_SUMMARY_TOKENS = 512;  // max tokens for merged final summary
-const KEEP_RECENT = 6;             // keep last N messages uncompressed
+const CHUNK_SUMMARY_TOKENS = 400;  // max tokens for each chunk summary
+const FINAL_SUMMARY_TOKENS = 1500; // max tokens for merged final summary
+const KEEP_RECENT = 15;            // keep last N messages uncompressed
 const MIN_MESSAGES = 4;            // minimum non-system messages before compacting
 
 // ── Message formatting ──────────────────────────────────────────────────────
@@ -115,18 +116,29 @@ async function streamSummary(
   maxTokens: number,
   signal?: AbortSignal,
 ): Promise<string> {
+  // Dot-progress indicator — streamSummary can be called from compactMessages
+  // which may run 1-3+ LLM calls for chunking + merging. Gives user visible
+  // feedback without interfering with concurrent spinners in commands.ts.
+  const dotInterval = setInterval(() => {
+    process.stdout.write(chalk.gray('.'));
+  }, 1000);
+
   let summary = '';
-  const stream = provider.stream(messages, {
-    model,
-    maxTokens,
-    // Reasoner models don't support temperature — omit it.
-    ...(isReasoner ? {} : { temperature: 0.2 }),
-    signal,
-  });
-  for await (const chunk of stream) {
-    if (chunk.type === 'text_delta') summary += chunk.text;
+  try {
+    const stream = provider.stream(messages, {
+      model,
+      maxTokens,
+      // Reasoner models don't support temperature — omit it.
+      ...(isReasoner ? {} : { temperature: 0.2 }),
+      signal,
+    });
+    for await (const chunk of stream) {
+      if (chunk.type === 'text_delta') summary += chunk.text;
+    }
+    return summary.trim();
+  } finally {
+    clearInterval(dotInterval);
   }
-  return summary.trim();
 }
 
 // ── Chunking ─────────────────────────────────────────────────────────────────

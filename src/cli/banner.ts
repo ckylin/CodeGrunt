@@ -113,7 +113,7 @@ export function printBanner(model: string): void {
   process.stdout.write(
     '  ' +
     bold.white('CodeGrunt') +
-    dim('  v0.1.0  ·  model: ') +
+    dim('  v0.1.2  ·  model: ') +
     blue(model) +
     dim('  ·  /help for commands') +
     '\n\n',

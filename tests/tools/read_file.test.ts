@@ -13,7 +13,7 @@ describe('read_file', () => {
   });
 
   afterEach(async () => {
-    await rm(dir, { recursive: true, force: true });
+    await rm(dir, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 });
   });
 
   it('reads a file successfully', async () => {
@@ -32,7 +32,7 @@ describe('read_file', () => {
 
   it('truncates large files', async () => {
     const filePath = join(dir, 'large.txt');
-    await writeFile(filePath, 'x'.repeat(40_000));
+    await writeFile(filePath, 'x'.repeat(110_000));
     const result = await readFileTool.execute({ path: filePath });
     expect(result.success).toBe(true);
     expect(result.output).toContain('truncated');

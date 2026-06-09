@@ -12,13 +12,14 @@ import { editFileTool } from './edit_file.js';
 import { executeShellTool } from './execute_shell.js';
 import { listDirectoryTool } from './list_directory.js';
 import { searchFilesTool } from './search_files.js';
+import { memoryWriteTool, memoryReadTool } from './memory.js';
 import { getLogger } from '../observability/logger.js';
 
 const log = getLogger('tools:registry');
 
 // ── Registry ─────────────────────────────────────────────────────────────
 
-export interface ToolRegistration {
+interface ToolRegistration {
   tool: Tool;
   /** When the tool was registered */
   registeredAt: number;
@@ -26,7 +27,7 @@ export interface ToolRegistration {
   source: string;
 }
 
-export class ToolRegistry {
+class ToolRegistry {
   private tools = new Map<string, ToolRegistration>();
 
   constructor() {
@@ -89,6 +90,8 @@ export class ToolRegistry {
       executeShellTool,
       listDirectoryTool,
       searchFilesTool,
+      memoryWriteTool,
+      memoryReadTool,
     ];
     for (const tool of builtins) {
       this.register(tool, 'builtin');
@@ -100,17 +103,9 @@ export class ToolRegistry {
 
 let defaultRegistry: ToolRegistry | null = null;
 
-export function getToolRegistry(): ToolRegistry {
+function getToolRegistry(): ToolRegistry {
   if (!defaultRegistry) defaultRegistry = new ToolRegistry();
   return defaultRegistry;
-}
-
-export function resetToolRegistry(): void {
-  defaultRegistry = null;
-}
-
-export function getAllTools(): Tool[] {
-  return getToolRegistry().getAll();
 }
 
 export function getToolDefinitions(): ToolDefinition[] {

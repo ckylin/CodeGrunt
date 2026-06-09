@@ -41,7 +41,12 @@ export class ProcessToolCallsStage implements Stage {
     const hasReadInBatch = ctx.toolCalls.some(tc => READ_TOOL_NAMES.has(tc.function.name));
     const shouldWarnBlindWrite = hasWriteInBatch && !hasReadInBatch && !ctx.hasReadThisTurn && !ctx.warnedBlindWrite;
 
-    for (const tc of ctx.toolCalls) {
+    // Keep a reference to the assistant message we just pushed so we can trim
+    // its tool_calls array if the user rejects partway through a batch.
+    const assistantMsg = ctx.messages[ctx.messages.length - 1] as import('../../../types.js').ToolCallMessage;
+
+    for (let tcIndex = 0; tcIndex < ctx.toolCalls.length; tcIndex++) {
+      const tc = ctx.toolCalls[tcIndex];
       let parsedArgs: Record<string, unknown> = {};
       try {
         parsedArgs = JSON.parse(tc.function.arguments) as Record<string, unknown>;
@@ -110,17 +115,29 @@ export class ProcessToolCallsStage implements Stage {
         metrics.increment(`tool.${tc.function.name}.errors`);
       }
 
+      if (result.userRejected) {
+        // Push a cancellation result for this tool call
+        ctx.messages.push({
+          role: 'tool',
+          tool_call_id: tc.id,
+          content: '[Tool call cancelled by user]',
+        });
+
+        // Trim the assistant message's tool_calls to only the calls that
+        // actually ran (up to and including the rejected one), so the history
+        // stays consistent when the batch has more calls that were never executed.
+        assistantMsg.tool_calls = ctx.toolCalls.slice(0, tcIndex + 1);
+
+        log.info('Tool call rejected by user', { tool: tc.function.name, batchIndex: tcIndex, batchTotal: ctx.toolCalls.length });
+        return { continue: false, done: true, userRejected: true };
+      }
+
       // Push tool result to context
       ctx.messages.push({
         role: 'tool',
         tool_call_id: tc.id,
         content: result.success ? result.output : (result.error ?? result.output),
       });
-
-      if (result.userRejected) {
-        log.info('Tool call rejected by user', { tool: tc.function.name });
-        return { continue: false, done: true, userRejected: true };
-      }
     }
 
     // Inject blind-write warning after all tool results

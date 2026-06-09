@@ -2,6 +2,7 @@ import { spawn } from 'child_process';
 import type { Tool, ToolResult } from '../../types.js';
 
 const DEFAULT_TIMEOUT_MS = 30_000;
+const MAX_TIMEOUT_MS = 300_000; // 5 minutes hard cap
 const MAX_OUTPUT_BYTES = 512 * 1024; // 512 KB cap to avoid huge outputs stalling the LLM
 
 export const executeShellTool: Tool = {
@@ -9,7 +10,7 @@ export const executeShellTool: Tool = {
     type: 'function',
     function: {
       name: 'execute_shell',
-      description: 'Execute a shell command and return its output. The working directory is already set to the project root — do NOT prepend "cd <path> &&" to commands. Use for running tests, builds, installing packages, git commands, etc.',
+      description: 'Execute a shell command and return its output. The working directory is already set to the project root — do NOT prepend "cd <path> &&" to commands. Use for running tests, builds, installing packages, git commands, etc. Timeout: default 30s, max 5 minutes.',
       parameters: {
         type: 'object',
         properties: {
@@ -34,7 +35,9 @@ export const executeShellTool: Tool = {
   async execute(args): Promise<ToolResult> {
     const command = args.command as string;
     const cwd = (args.cwd as string | undefined) ?? process.cwd();
-    const timeoutMs = (args.timeout_ms as number | undefined) ?? DEFAULT_TIMEOUT_MS;
+    const rawTimeout = (args.timeout_ms as number | undefined) ?? DEFAULT_TIMEOUT_MS;
+    const clamped = rawTimeout > MAX_TIMEOUT_MS;
+    const timeoutMs = clamped ? MAX_TIMEOUT_MS : rawTimeout;
 
     return new Promise((resolve) => {
       const chunks: Buffer[] = [];
@@ -75,8 +78,9 @@ export const executeShellTool: Tool = {
         clearTimeout(timer);
         let output = Buffer.concat(chunks).toString('utf-8');
         if (truncated) output += `\n[Output truncated at ${MAX_OUTPUT_BYTES} bytes]`;
+        if (clamped) output += `\n[timeout clamped to 5min]`;
         if (timedOut) {
-          resolve({ success: false, output, error: `Command timed out after ${timeoutMs}ms` });
+          resolve({ success: false, output, error: `Command timed out after ${timeoutMs}ms (captured ${totalBytes} bytes)` });
         } else if (code !== 0) {
           resolve({ success: false, output, error: `Command exited with code ${code}` });
         } else {

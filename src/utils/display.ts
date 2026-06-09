@@ -72,15 +72,10 @@ export function createToolSpinner(name: string, args: Record<string, unknown>): 
   };
 }
 
-export function printUserMessage(text: string): void {
-  process.stdout.write('\n  ' + blue('You') + '\n');
-  for (const line of text.split('\n')) {
-    process.stdout.write('  ' + chalk.white(line) + '\n');
-  }
-  process.stdout.write('\n');
-}
-
 export function printAssistantHeader(): void {
+  // Silent by default — the separator line is visual noise.
+  // Enable CODEGRUNT_VERBOSE to see the header.
+  if (!process.env['CODEGRUNT_VERBOSE']) return;
   const cols = process.stdout.columns || 80;
   const label = ' ' + blue('CodeGrunt') + ' ';
   const labelLen = ' CodeGrunt '.length;
@@ -100,18 +95,13 @@ export function printError(message: string): void {
   process.stderr.write(danger('  error  ') + message + '\n');
 }
 
-export function printInfo(message: string): void {
-  process.stdout.write(muted('  ' + message) + '\n');
-}
-
-export function printDivider(): void {
-  process.stdout.write(muted('-'.repeat(process.stdout.columns || 80)) + '\n');
-}
-
 // ── P/G/E Plan & Evaluation Display ─────────────────────────────────────
+// All plan/step/eval display functions are silent by default to match the
+// Claude Code experience. Enable CODEGRUNT_VERBOSE to see them.
 
-/** Display intent classification result — only shown for non-coding path */
+/** Display intent classification result — silent by default */
 export function printIntentResult(intent: IntentResult): void {
+  if (!process.env['CODEGRUNT_VERBOSE']) return;
   if (intent.matchedSkill) {
     process.stdout.write(muted(`  skill: ${intent.matchedSkill.name}\n`));
   } else if (!intent.isCoding) {
@@ -119,19 +109,21 @@ export function printIntentResult(intent: IntentResult): void {
   }
 }
 
-/** Display the plan header when Planner completes */
+/** Display the plan header when Planner completes — silent by default */
 export function printPlanHeader(plan: TaskPlan): void {
+  if (!process.env['CODEGRUNT_VERBOSE']) return;
   const stepCount = plan.steps.length;
   process.stdout.write('\n  ' + blue('▸') + '  ' + chalk.bold(plan.goal) + muted(`  (${stepCount} steps)`) + '\n');
 }
 
-/** Display current step progress */
+/** Display current step progress — silent by default */
 export function printStepProgress(stepIndex: number, totalSteps: number, description: string): void {
+  if (!process.env['CODEGRUNT_VERBOSE']) return;
   const truncated = description.length > 60 ? description.slice(0, 60) + '…' : description;
   process.stdout.write('\n' + muted(`  ${stepIndex + 1}/${totalSteps}  `) + truncated + '\n');
 }
 
-/** Display evaluation result — silent unless DEBUG env var is set */
+/** Display evaluation result — silent unless DEBUG or CODEGRUNT_VERBOSE */
 export function printEvaluation(evaluation: EvaluationResult, _language: 'zh' | 'en'): void {
   if (evaluation.passed) return;
   if (!process.env['DEBUG'] && !process.env['CODEGRUNT_VERBOSE']) return;
@@ -142,7 +134,8 @@ export function printEvaluation(evaluation: EvaluationResult, _language: 'zh' | 
   }
 }
 
-/** Display refinement retry indicator */
+/** Display refinement retry indicator — silent by default */
 export function printRefineIndicator(retryCount: number, maxRetries: number, _language: 'zh' | 'en'): void {
+  if (!process.env['CODEGRUNT_VERBOSE']) return;
   process.stdout.write(muted(`  retrying ${retryCount}/${maxRetries}…\n`));
 }

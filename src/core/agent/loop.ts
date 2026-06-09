@@ -25,7 +25,10 @@ import ora from 'ora';
 import { ContextManager } from '../context/manager.js';
 import { loadProjectGuide } from '../context/project-guide.js';
 import { getToolDefinitions } from '../tools/registry.js';
-import { resetYesAll } from '../pipeline/stages/process-tools-helpers.js';
+import { resetYesAll, isYesAllActive } from '../pipeline/stages/process-tools-helpers.js';
+import { confirmYesNo } from '../../utils/confirm.js';
+import { detectInputLanguage } from '../memory/habits.js';
+import type { TurnSignal } from '../../types.js';
 import {
   printAssistantHeader, printThinkingCollapsed,
   printPlanHeader, printStepProgress, printEvaluation, printRefineIndicator,
@@ -33,6 +36,10 @@ import {
 } from '../../utils/display.js';
 import { MarkdownRenderer } from '../../utils/markdown.js';
 import { CHAT_CONTEXT_BUDGET } from '../../config.js';
+import { detectSystemLanguage } from '../../utils/locale.js';
+import { compactMessages } from '../context/compact.js';
+import { isReasonerModel } from '../../config.js';
+import { saveSessionSummary } from '../memory/store.js';
 
 // ── P/G/E modules ────────────────────────────────────────────────────────
 import { detectIntent } from './intentor.js';
@@ -61,41 +68,6 @@ const log = getLogger('agent');
 
 const MAX_ITERATIONS = 30;
 const MAX_REFINE_RETRIES = 3;
-
-// ── Cumulative usage tracking (kept for backward compat) ─────────────────
-const sessionUsage = { inputTokens: 0, outputTokens: 0, cacheHitTokens: 0, cacheMissTokens: 0 };
-export function addUsage(u: { inputTokens: number; outputTokens: number; cacheHitTokens: number; cacheMissTokens: number }): void {
-  sessionUsage.inputTokens += u.inputTokens;
-  sessionUsage.outputTokens += u.outputTokens;
-  sessionUsage.cacheHitTokens += u.cacheHitTokens;
-  sessionUsage.cacheMissTokens += u.cacheMissTokens;
-}
-export function getSessionUsage(): typeof sessionUsage {
-  return { ...sessionUsage };
-}
-export function resetSessionUsage(): void {
-  sessionUsage.inputTokens = 0;
-  sessionUsage.outputTokens = 0;
-  sessionUsage.cacheHitTokens = 0;
-  sessionUsage.cacheMissTokens = 0;
-}
-
-// ── Language detection ───────────────────────────────────────────────────
-
-function detectSystemLanguage(): 'zh' | 'en' {
-  const locale = process.env.LC_ALL
-    || process.env.LC_MESSAGES
-    || process.env.LANG
-    || '';
-  if (locale.toLowerCase().startsWith('zh')) return 'zh';
-  if (process.platform === 'win32') {
-    try {
-      const resolved = Intl.DateTimeFormat().resolvedOptions().locale;
-      if (resolved.toLowerCase().startsWith('zh')) return 'zh';
-    } catch { /* ignore */ }
-  }
-  return 'en';
-}
 
 // ── UI-aware StreamEmitter ────────────────────────────────────────────────
 
@@ -273,6 +245,9 @@ async function runGenerator(
     hasReadThisTurn: sessionHasRead,
     warnedBlindWrite: false,
     language: lang,
+    systemPromptOverride: options.systemPromptOverride,
+    memorySummary: options.memorySummary,
+    userPreferences: options.userPreferences,
   };
 
   const result = await engine.execute(pipeline, pipeCtx);
@@ -305,8 +280,33 @@ export async function runAgentLoop(options: AgentRunOptions): Promise<void> {
 
   resetYesAll();
 
-  // ══════════════════════════════════════════════════════════════════════
-  // PHASE 0: INTENTOR — classify intent, match skills
+  // Auto-compact: if the context flagged itself as near-capacity on the previous
+  // turn, summarize before running the next agent turn so history is preserved
+  // rather than silently dropped. Runs a single LLM call to produce the summary.
+  if (context.needsCompact) {
+    context.needsCompact = false;
+    process.stdout.write(chalk.gray('  [compacting context'));
+    try {
+      const compactResult = await compactMessages(context.getMessages(), {
+        provider,
+        model,
+        isReasoner: isReasonerModel(model),
+        language: lang,
+        signal,
+      });
+      if (compactResult) {
+        context.compact(compactResult.summary);
+        saveSessionSummary(cwd, compactResult.summary).catch(() => {});
+        process.stdout.write(chalk.gray(`  ${compactResult.beforeTokens}→${compactResult.afterTokens} tokens]\n`));
+        log.info('Auto-compact complete', { before: compactResult.beforeTokens, after: compactResult.afterTokens });
+      } else {
+        process.stdout.write(chalk.gray('  skipped]\n'));
+      }
+    } catch (err) {
+      process.stdout.write(chalk.gray('  failed, continuing]\n'));
+      log.warn('Auto-compact failed', { error: err instanceof Error ? err.message : String(err) });
+    }
+  }
   // ══════════════════════════════════════════════════════════════════════
 
   log.info('Phase 0: Intentor — classifying intent');
@@ -315,18 +315,45 @@ export async function runAgentLoop(options: AgentRunOptions): Promise<void> {
   try {
     intent = await detectIntent(provider, model, task, lang, signal, options.skills ?? []);
   } catch {
-    intent = { isCoding: true, confidence: 50, reason: 'classification error', needsFullPlan: true };
+    intent = { isCoding: true, confidence: 50, reason: 'classification error'};
   }
 
   printIntentResult(intent);
   log.info('Intent classified', { isCoding: intent.isCoding, confidence: intent.confidence, matchedSkill: intent.matchedSkill?.name });
 
-  if (intent.matchedSkill) {
-    await runSkillFlow(options, context, lang, intent.matchedSkill, metrics);
-  } else if (intent.isCoding) {
-    await runCodingFlow(options, context, lang, intent, metrics, bus);
-  } else {
-    await runChatFlow(options, context, lang, metrics);
+  // Subscribe to tool:result events to collect per-turn confirmation stats
+  const turnStats = { toolCallCount: 0, confirmations: 0, rejections: 0 };
+  const unsubToolResult = bus.on<import('../events/bus.js').ToolResultEvent>('tool:result', (e) => {
+    turnStats.toolCallCount++;
+    if (e.userRejected) turnStats.rejections++;
+    else if (e.success) turnStats.confirmations++;
+  });
+
+  let responseLength = 0;
+  try {
+    if (intent.matchedSkill) {
+      ({ responseLength } = await runSkillFlow(options, context, lang, intent.matchedSkill, metrics));
+    } else if (intent.isCoding) {
+      ({ responseLength } = await runCodingFlow(options, context, lang, intent, metrics, bus));
+    } else {
+      ({ responseLength } = await runChatFlow(options, context, lang, metrics));
+    }
+  } finally {
+    unsubToolResult();
+    // Emit per-turn signal for habit tracking — runs even on abort/throw so
+    // aborted turns are still counted in habitState.
+    const signal_: TurnSignal = {
+      userInputLength: task.length,
+      userInputLang:   detectInputLanguage(task),
+      responseLength,
+      isCoding:        intent.isCoding,
+      toolCallCount:   turnStats.toolCallCount,
+      confirmations:   turnStats.confirmations,
+      rejections:      turnStats.rejections,
+      yesAll:          isYesAllActive(),
+      aborted:         signal?.aborted ?? false,
+    };
+    options.onTurnComplete?.(signal_);
   }
 }
 
@@ -338,7 +365,7 @@ async function runSkillFlow(
   lang: 'zh' | 'en',
   skill: NonNullable<IntentResult['matchedSkill']>,
   metrics: ReturnType<typeof getDefaultMetrics>,
-): Promise<void> {
+): Promise<{ responseLength: number }> {
   const { onToolCall, onToolResult, signal } = options;
 
   log.info('Skill flow', { skill: skill.name });
@@ -354,7 +381,7 @@ async function runSkillFlow(
 
   const genResult = await runGenerator(context, skillOptions, lang, 0);
 
-  if (genResult.userRejected) { log.info('Skill flow ended — user rejected'); return; }
+  if (genResult.userRejected) { log.info('Skill flow ended — user rejected'); return { responseLength: 0 }; }
   if (genResult.error) throw genResult.error;
 
   displayToolCalls(genResult.pipeCtx, onToolCall, onToolResult);
@@ -373,6 +400,7 @@ async function runSkillFlow(
 
   log.info('Skill flow complete', { skill: skill.name, iterations: iteration });
   metrics.increment('agent.skill_turns');
+  return { responseLength: current.pipeCtx.assistantText.length };
 }
 
 // ── Coding flow: Planner → Generator → Evaluator ─────────────────────────
@@ -393,7 +421,7 @@ async function runCodingFlow(
   intent: IntentResult,
   metrics: ReturnType<typeof getDefaultMetrics>,
   _bus: ReturnType<typeof getDefaultEventBus>,
-): Promise<void> {
+): Promise<{ responseLength: number }> {
   const { task, provider, onText, onToolCall, onToolResult, signal } = options;
   const model = options.config.model;
 
@@ -527,6 +555,7 @@ async function runCodingFlow(
         currentTurnToolCalls,
         currentTurnToolResults,
         language: lang,
+        cwd: options.cwd,
         signal,
       });
 
@@ -549,10 +578,28 @@ async function runCodingFlow(
         log.info('Refining step', { stepId: step.id, retry: refineCount + 1 });
       } else {
         log.warn('Max retries exhausted for step', { stepId: step.id });
-        process.stdout.write(chalk.yellow(`  ! step ${step.id} max retries, continuing\n`));
         pruneRefineMessages(context);
-        stepPassed = true;
-        finalAssistantText = genResult.pipeCtx.assistantText;
+
+        const issuesSummary = (lastEval?.issues ?? []).join(', ') || (lang === 'zh' ? '未知问题' : 'unknown issues');
+        const stepLabel = lang === 'zh'
+          ? `步骤 ${step.id}/${plan.steps.length} 重试次数耗尽`
+          : `Step ${step.id}/${plan.steps.length} failed after ${MAX_REFINE_RETRIES} retries`;
+        const promptText = lang === 'zh'
+          ? `⚠  ${stepLabel}。\n问题：${issuesSummary}\n是否继续？[y/N]`
+          : `⚠  ${stepLabel}.\nIssues: ${issuesSummary}\nContinue anyway? [y/N]`;
+
+        const wantContinue = await confirmYesNo(promptText);
+        if (wantContinue) {
+          const warningMsg = lang === 'zh'
+            ? `[警告：步骤 ${step.id} 可能未完成 — 用户选择继续]`
+            : `[WARNING: step ${step.id} may be incomplete — continuing at user request]`;
+          context.push({ role: 'user', content: warningMsg });
+          stepPassed = true;
+          finalAssistantText = genResult.pipeCtx.assistantText;
+        } else {
+          userRejected = true;
+          break;
+        }
       }
     }
 
@@ -560,7 +607,7 @@ async function runCodingFlow(
     if (!stepPassed) log.error('Step failed after all retries', { stepId: step.id });
   }
 
-  if (userRejected) { log.info('Agent ended — user rejected'); return; }
+  if (userRejected) { log.info('Agent ended — user rejected'); return { responseLength: 0 }; }
 
   if (finalAssistantText) {
     process.stdout.write('\n');
@@ -573,6 +620,7 @@ async function runCodingFlow(
 
   log.info('Coding flow complete', { planSteps: plan.steps.length });
   metrics.increment('agent.coding_turns');
+  return { responseLength: finalAssistantText.length };
 }
 
 // ── Chat flow: (optional lightweight plan) → Generator only ──────────────
@@ -582,14 +630,14 @@ async function runChatFlow(
   context: ContextManager,
   lang: 'zh' | 'en',
   metrics: ReturnType<typeof getDefaultMetrics>,
-): Promise<void> {
+): Promise<{ responseLength: number }> {
   const { task, onToolCall, onToolResult, signal } = options;
 
   log.info('Phase 1 (chat): direct generation — no Evaluator');
 
   const genResult = await runGenerator(context, options, lang, 0);
 
-  if (genResult.userRejected) { log.info('Chat flow ended — user rejected'); return; }
+  if (genResult.userRejected) { log.info('Chat flow ended — user rejected'); return { responseLength: 0 }; }
   if (genResult.error) throw genResult.error;
 
   displayToolCalls(genResult.pipeCtx, onToolCall, onToolResult);
@@ -619,4 +667,5 @@ async function runChatFlow(
 
   log.info('Chat flow complete', { iterations: iteration });
   metrics.increment('agent.chat_turns');
+  return { responseLength: current.pipeCtx.assistantText.length };
 }

@@ -9,12 +9,13 @@ import type { Stage, StageResult, PipelineContext } from '../types.js';
 import { loadProjectGuide } from '../../context/project-guide.js';
 import { isReasonerModel } from '../../../config.js';
 import { getLogger } from '../../observability/logger.js';
+import { detectSystemLanguage } from '../../../utils/locale.js';
 
 const log = getLogger('stage:prepare-context');
 
 // ── System prompt segments ─────────────────────────────────────────────────
 
-function buildSystemPrompt(guide: string | null, language: 'zh' | 'en'): string {
+function buildSystemPrompt(guide: string | null, language: 'zh' | 'en', memorySummary?: string | null, userPreferences?: string | null): string {
   const langInstruction = language === 'zh'
     ? `## Language
 - The user's system language is Chinese (zh). You MUST respond in Chinese (Simplified Chinese, 简体中文) at all times.
@@ -28,6 +29,14 @@ function buildSystemPrompt(guide: string | null, language: 'zh' | 'en'): string 
 You have access to tools that let you read files, write files, edit files, run shell commands, list directories, and search code. Use them to complete the user's task.
 
 ${langInstruction}
+
+## CRITICAL — Conciseness
+- **Minimize output tokens. Be terse. Get straight to the point.**
+- **Do NOT explain what you are about to do — just do it.** No preambles.
+- **Do NOT repeat the user request back to them.**
+- **After tool results, do NOT narrate what happened.**
+- **When done, summarize in 1-2 lines max.**
+- **In coding tasks: emit tool calls first, then briefly confirm.**
 
 ## Core Guidelines
 - Read files before editing them to understand the current content
@@ -55,9 +64,22 @@ ${langInstruction}
 - When generating new code, you MUST first find and read at least one existing file that demonstrates the pattern, style, and conventions you plan to follow. Copy-adapt is safer than inventing.
 - Every code change must be traceable to something you actually READ during this session — not your training data. If you haven't read a relevant file yet, read it before writing.
 - If you're unsure whether a function/type/import path exists, use search_files or read_file to verify BEFORE writing code that depends on it.
-- For any non-trivial edit, add a brief comment in the code referencing the file(s) that informed your change (e.g., "// Ref: src/utils/billing.ts L23-45" or "// Following pattern from src/cli/commands.ts").`;
+- For any non-trivial edit, add a brief comment in the code referencing the file(s) that informed your change (e.g., "// Ref: src/utils/billing.ts L23-45" or "// Following pattern from src/cli/commands.ts").
 
-  return guide ? base + guide : base;
+## Memory Tools
+You have \`memory_write\` and \`memory_read\` tools to store and retrieve persistent facts across sessions.
+- Use \`memory_write\` to record user preferences, project decisions, feedback, or reference snippets worth preserving.
+- Use \`memory_read\` to retrieve previously stored facts when relevant to the current task.
+- Always use \`memory_read\` at the start of a session if the user references something you may have stored before.`;
+
+  let result = guide ? base + guide : base;
+  if (userPreferences) {
+    result += `\n\n---\n## User Preferences\n\n${userPreferences}`;
+  }
+  if (memorySummary) {
+    result += `\n\n---\n## Memory: Previous Session Summary\n\n${memorySummary}`;
+  }
+  return result;
 }
 
 function buildFirstUserPrefix(cwd: string, model: string, systemPrompt?: string): string {
@@ -72,43 +94,32 @@ function buildFirstUserPrefix(cwd: string, model: string, systemPrompt?: string)
   return parts.join('\n') + '\n\n';
 }
 
-// ── Language detection ─────────────────────────────────────────────────────
-
-function detectSystemLanguage(): 'zh' | 'en' {
-  const locale = process.env.LC_ALL
-    || process.env.LC_MESSAGES
-    || process.env.LANG
-    || '';
-  if (locale.toLowerCase().startsWith('zh')) return 'zh';
-  if (process.platform === 'win32') {
-    try {
-      const resolved = Intl.DateTimeFormat().resolvedOptions().locale;
-      if (resolved.toLowerCase().startsWith('zh')) return 'zh';
-    } catch { /* ignore */ }
-  }
-  return 'en';
-}
-
 // ── Stage ──────────────────────────────────────────────────────────────────
 
 export class PrepareContextStage implements Stage {
   readonly name = 'prepare-context';
   private guide: string | null = null;
+  private memorySummary: string | null = null;
+  private userPreferences: string | null = null;
   private initialized = false;
 
   async execute(ctx: PipelineContext): Promise<StageResult> {
     // One-time initialization: build system prompt, load project guide
     if (!this.initialized) {
       this.guide = await loadProjectGuide(ctx.cwd);
+      this.memorySummary = ctx.memorySummary ?? null;
+      this.userPreferences = ctx.userPreferences ?? null;
       const lang = detectSystemLanguage();
       ctx.language = lang;
-      ctx.systemPrompt = this.guide
-        ? buildSystemPrompt(this.guide, lang)
-        : buildSystemPrompt(null, lang);
       ctx.isReasoner = isReasonerModel(ctx.config.model);
       this.initialized = true;
       log.info('System prompt built', { hasGuide: !!this.guide, language: lang });
     }
+
+    // Apply system prompt — skill override takes precedence over the default.
+    // Re-evaluated every turn so a skill activated mid-session is picked up.
+    ctx.systemPrompt = ctx.systemPromptOverride
+      ?? buildSystemPrompt(this.guide, ctx.language, this.memorySummary, this.userPreferences);
 
     // Push system prompt if needed (only for non-reasoner, first message)
     if (ctx.messages.length === 0) {

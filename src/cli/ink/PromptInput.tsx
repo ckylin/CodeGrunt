@@ -27,12 +27,14 @@ export function PromptInput({
   const [input, setInput] = useState('');
   const [cursor, setCursor] = useState(0);
   const [dropdownIndex, setDropdownIndex] = useState(0);
+  const [exitHint, setExitHint] = useState(false);
   const historyCtrl = useRef(createHistoryController());
   // Refs mirror state so useInput callbacks always read the latest values.
   // Updated synchronously in the handler (not via useEffect) so rapid keypresses
   // never see stale values between React renders.
   const inputRef = useRef('');
   const cursorRef = useRef(0);
+  const lastCtrlCRef = useRef(0);
 
   const apply = (nextInput: string, nextCursor: number) => {
     inputRef.current = nextInput;
@@ -53,9 +55,17 @@ export function PromptInput({
     const cur = cursorRef.current;
     const inp = inputRef.current;
 
-    // Ctrl+C → cancel
+    // Ctrl+C → double-press within 2s to exit
     if (key.ctrl && char === 'c') {
-      onSubmit({ text: '', cancelled: true });
+      const now = Date.now();
+      if (now - lastCtrlCRef.current < 2000) {
+        onSubmit({ text: '', cancelled: true });
+      } else {
+        lastCtrlCRef.current = now;
+        setExitHint(true);
+        // Auto-hide hint after 2s so it disappears if user doesn't press again
+        setTimeout(() => setExitHint(false), 2000);
+      }
       return;
     }
 
@@ -201,6 +211,9 @@ export function PromptInput({
             ].filter(Boolean).join('  ·  ')}
           </Text>
         </Box>
+      )}
+      {exitHint && (
+        <Text color="yellow">{'(Press Ctrl+C again within 2s to exit)'}</Text>
       )}
       <Text>{promptStyled + inputLine}</Text>
       <Dropdown

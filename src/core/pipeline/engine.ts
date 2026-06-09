@@ -138,11 +138,6 @@ export class PipelineBuilder {
     return this;
   }
 
-  addStages(stages: Stage[]): this {
-    this.stages.push(...stages);
-    return this;
-  }
-
   build(): Pipeline {
     return { name: this._name, stages: [...this.stages] };
   }
