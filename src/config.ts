@@ -59,6 +59,13 @@ export async function loadConfig(): Promise<CodeGruntConfig> {
     topP: envFloat('CODEGRUNT_TOP_P', fileConfig.topP ?? DEFAULTS.topP),
     frequencyPenalty: envFloat('CODEGRUNT_FREQUENCY_PENALTY', fileConfig.frequencyPenalty ?? DEFAULTS.frequencyPenalty),
     presencePenalty: envFloat('CODEGRUNT_PRESENCE_PENALTY', fileConfig.presencePenalty ?? DEFAULTS.presencePenalty),
+    trustMode: (process.env.CODEGRUNT_TRUST_MODE as 'plan' | 'code' | 'auto')
+      ?? fileConfig.trustMode
+      ?? 'code',
+    searchEngine: (process.env.CODEGRUNT_SEARCH_ENGINE as 'mojeek' | 'searxng' | 'duckduckgo')
+      ?? fileConfig.searchEngine
+      ?? 'mojeek',
+    searxngUrl: process.env.CODEGRUNT_SEARXNG_URL ?? fileConfig.searxngUrl,
   };
 }
 
@@ -76,6 +83,9 @@ export async function saveConfig(config: CodeGruntConfig): Promise<void> {
         topP: config.topP,
         frequencyPenalty: config.frequencyPenalty,
         presencePenalty: config.presencePenalty,
+        trustMode: config.trustMode,
+        searchEngine: config.searchEngine,
+        searxngUrl: config.searxngUrl,
       },
       null,
       2,

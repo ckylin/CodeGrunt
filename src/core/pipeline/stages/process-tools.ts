@@ -9,11 +9,13 @@ import type { Stage, StageResult, PipelineContext } from '../types.js';
 import type { ToolCallMessage } from '../../../types.js';
 import { READ_TOOL_NAMES, WRITE_TOOL_NAMES } from '../types.js';
 import { getToolByName } from '../../tools/registry.js';
-import { executeToolCall } from './process-tools-helpers.js';
+import { executeToolCall, repairToolArgs } from './process-tools-helpers.js';
 import { getLogger } from '../../observability/logger.js';
 import { getDefaultEventBus, type ToolCallEvent, type ToolResultEvent } from '../../events/bus.js';
 import { getDefaultMetrics } from '../../observability/metrics.js';
 import { createToolSpinner, type ToolSpinner } from '../../../utils/display.js';
+import { getHookRegistry } from '../../hooks/registry.js';
+import { runDiagnostics, formatDiagnostics } from '../../lsp/checker.js';
 
 const log = getLogger('stage:process-tools');
 
@@ -48,13 +50,13 @@ export class ProcessToolCallsStage implements Stage {
     for (let tcIndex = 0; tcIndex < ctx.toolCalls.length; tcIndex++) {
       const tc = ctx.toolCalls[tcIndex];
       let parsedArgs: Record<string, unknown> = {};
-      try {
-        parsedArgs = JSON.parse(tc.function.arguments) as Record<string, unknown>;
-      } catch (e) {
-        log.warn('Failed to parse tool call arguments', {
+      const repaired = repairToolArgs(tc.function.arguments);
+      if (repaired !== null) {
+        parsedArgs = repaired;
+      } else {
+        log.warn('Failed to parse tool call arguments after repair attempts', {
           tool: tc.function.name,
           raw: tc.function.arguments.slice(0, 200),
-          error: String(e),
         });
       }
 
@@ -80,9 +82,35 @@ export class ProcessToolCallsStage implements Stage {
       // ── Start spinner for this tool call ────────────────────────────
       const spinner: ToolSpinner = createToolSpinner(tc.function.name, parsedArgs);
 
+      // ── PreToolUse hook ──────────────────────────────────────────────
+      const hooks = getHookRegistry();
+      const preHookResult = await hooks.run({
+        event: 'pre-tool-use',
+        tool_name: tc.function.name,
+        tool_input: parsedArgs,
+        cwd: ctx.cwd,
+      });
+      if (preHookResult.action === 'block') {
+        spinner.done(false, 0, `Blocked by hook: ${preHookResult.reason}`);
+        ctx.messages.push({
+          role: 'tool',
+          tool_call_id: tc.id,
+          content: `[Tool call blocked by hook: ${preHookResult.reason}]`,
+        });
+        assistantMsg.tool_calls = ctx.toolCalls.slice(0, tcIndex + 1);
+        return { continue: false, done: true, userRejected: true };
+      }
+      // Allow hooks to rewrite tool input (e.g. sanitize args)
+      const effectiveArgs = preHookResult.action === 'modify'
+        ? { ...parsedArgs, ...preHookResult.data }
+        : parsedArgs;
+      const effectiveArgsJson = preHookResult.action === 'modify'
+        ? JSON.stringify(effectiveArgs)
+        : tc.function.arguments;
+
       let result;
       try {
-        result = await executeToolCall(tc.function.name, tc.function.arguments, ctx.cwd);
+        result = await executeToolCall(tc.function.name, effectiveArgsJson, ctx.cwd);
       } catch (err) {
         result = {
           success: false,
@@ -111,6 +139,19 @@ export class ProcessToolCallsStage implements Stage {
       };
       bus.emit(resultEvent);
 
+      // ── PostToolUse hook ─────────────────────────────────────────────
+      await hooks.run({
+        event: 'post-tool-use',
+        tool_name: tc.function.name,
+        tool_input: effectiveArgs,
+        tool_result: {
+          success: result.success,
+          output: result.output,
+          error: result.error,
+        },
+        cwd: ctx.cwd,
+      });
+
       if (!result.success) {
         metrics.increment(`tool.${tc.function.name}.errors`);
       }
@@ -132,11 +173,23 @@ export class ProcessToolCallsStage implements Stage {
         return { continue: false, done: true, userRejected: true };
       }
 
-      // Push tool result to context
+      // Push tool result to context.
+      // On failure: include both the error summary AND the actual output (stdout+stderr),
+      // so the model has enough context to diagnose the root cause without guessing.
+      let toolContent: string;
+      if (result.success) {
+        toolContent = result.output;
+      } else {
+        const errorLine = result.error ?? 'Tool failed';
+        const outputBody = result.output?.trim();
+        toolContent = outputBody
+          ? `${errorLine}\n\nOutput:\n${outputBody}`
+          : errorLine;
+      }
       ctx.messages.push({
         role: 'tool',
         tool_call_id: tc.id,
-        content: result.success ? result.output : (result.error ?? result.output),
+        content: toolContent,
       });
     }
 
@@ -148,6 +201,23 @@ export class ProcessToolCallsStage implements Stage {
         : '⚠️ Blind write detected: you are attempting to edit code without having read any project files first. This greatly increases the risk of inventing non-existent APIs, types, or patterns. Consider using read_file or search_files to ground yourself before writing.';
       ctx.messages.push({ role: 'user', content: warning });
       log.warn('Blind write warning injected');
+    }
+
+    // Run language diagnostics after write/edit operations.
+    // Only inject if there are actual errors — warnings alone don't block progress.
+    const hadWrite = ctx.toolCalls.some(tc => WRITE_TOOL_NAMES.has(tc.function.name));
+    if (hadWrite) {
+      try {
+        const diagnostics = await runDiagnostics(ctx.cwd);
+        const errors = diagnostics.filter(d => !d.passed);
+        if (errors.length > 0) {
+          const msg = formatDiagnostics(errors, ctx.language);
+          ctx.messages.push({ role: 'user', content: msg });
+          log.info('Diagnostics injected', { errors: errors.map(d => `${d.language}:${d.errorCount}`) });
+        }
+      } catch {
+        // Diagnostics are best-effort — never crash the pipeline
+      }
     }
 
     return { continue: true, done: false };

@@ -6,12 +6,6 @@ import chalk from 'chalk';
 import { addUsage } from '../../core/usage.js';
 import { recordUsage } from '../../utils/billing.js';
 
-interface AccumulatedToolCall {
-  id: string;
-  name: string;
-  arguments: string;
-}
-
 const RETRYABLE_STATUS = new Set([429, 500, 502, 503, 504]);
 const RETRYABLE_CODES = new Set(['ECONNRESET', 'ETIMEDOUT']);
 const NON_RETRYABLE_STATUS = new Set([400, 401, 403, 404]);
@@ -134,8 +128,6 @@ export class DeepSeekProvider implements LLMProvider {
       stream_options: { include_usage: true },
     }, { signal: options.signal }), options.signal);
 
-    const accumulator = new Map<number, AccumulatedToolCall>();
-
     for await (const chunk of stream) {
       const choice = chunk.choices[0];
 
@@ -158,14 +150,9 @@ export class DeepSeekProvider implements LLMProvider {
         yield { type: 'reasoning_delta', text: reasoning };
       }
 
+      // Stream tool_call deltas directly — accumulation is handled by StreamResponseStage.
       if (delta.tool_calls) {
         for (const tc of delta.tool_calls) {
-          const existing = accumulator.get(tc.index) ?? { id: '', name: '', arguments: '' };
-          if (tc.id) existing.id = tc.id;
-          if (tc.function?.name) existing.name = tc.function.name;
-          if (tc.function?.arguments) existing.arguments += tc.function.arguments;
-          accumulator.set(tc.index, existing);
-
           yield {
             type: 'tool_call_delta',
             index: tc.index,

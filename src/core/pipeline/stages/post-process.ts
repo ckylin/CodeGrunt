@@ -26,10 +26,10 @@ export class PostProcessStage implements Stage {
     }
 
     // ── Helper: push assistant text message (text-only turns) ────────────
-    // Note: when finishReason === 'tool_calls', ProcessToolCallsStage is
-    // responsible for pushing the assistant(tool_calls) message. This helper
-    // must NOT push it here — doing so creates a duplicate that causes the
-    // DeepSeek API to return 400 "insufficient tool messages".
+    // ProcessToolCallsStage pushes the assistant(tool_calls) message.
+    // This helper is ONLY used for stop/length turns; tool_calls turns must NOT
+    // call it — doing so creates two consecutive assistant messages which
+    // causes a 400 "insufficient tool messages" error from the API.
     const pushAssistantMessage = () => {
       if (!ctx.assistantText) return;
       ctx.messages.push({
@@ -56,9 +56,11 @@ export class PostProcessStage implements Stage {
       return { continue: false, done: true };
     }
 
-    // ── Tool calls — more work needed; save text + tool_calls ────────────
+    // ── Tool calls — ProcessToolCallsStage handles the assistant message ──
+    // Do NOT push assistantText here even if the model produced some text
+    // alongside the tool calls — ProcessToolCallsStage's push already contains
+    // the content:null form required by the tool_calls message schema.
     if (effectiveReason === 'tool_calls') {
-      pushAssistantMessage();
       log.debug('Turn continues — tool calls pending', {
         count: ctx.toolCalls.length,
         hasText: ctx.assistantText.length > 0,

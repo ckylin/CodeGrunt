@@ -10,6 +10,7 @@ import { loadProjectGuide } from '../../context/project-guide.js';
 import { isReasonerModel } from '../../../config.js';
 import { getLogger } from '../../observability/logger.js';
 import { detectSystemLanguage } from '../../../utils/locale.js';
+import { createHash } from 'crypto';
 
 const log = getLogger('stage:prepare-context');
 
@@ -17,69 +18,90 @@ const log = getLogger('stage:prepare-context');
 
 function buildSystemPrompt(guide: string | null, language: 'zh' | 'en', memorySummary?: string | null, userPreferences?: string | null): string {
   const langInstruction = language === 'zh'
-    ? `## Language
-- The user's system language is Chinese (zh). You MUST respond in Chinese (Simplified Chinese, 简体中文) at all times.
-- All explanations, summaries, and conversation with the user should be in Chinese.
-- Code and technical identifiers (variable names, file paths, commands) remain in their original language.`
+    ? `## 语言
+你必须始终用中文（简体）回复用户。代码、命令、文件路径、变量名保持原始语言不变。`
     : `## Language
-- Respond in English only.`;
+Respond in English only. Code, commands, file paths, and identifiers stay in their original form.`;
 
-  const base = `You are CodeGrunt, an expert AI coding assistant running in the terminal. You are powered by DeepSeek, optimized for software engineering tasks.
+  // Core identity: autonomous executor, not a chat assistant
+  const identity = `You are CodeGrunt, an autonomous coding agent running in the terminal. Your job is to complete software engineering tasks by directly using tools — reading files, writing code, running commands, searching the codebase. You act; you do not plan aloud.
 
-You have access to tools that let you read files, write files, edit files, run shell commands, list directories, and search code. Use them to complete the user's task.
+${langInstruction}`;
 
-${langInstruction}
+  // Output discipline — modeled on Claude Code / Codex behavior
+  const outputDiscipline = `## Output discipline
 
-## CRITICAL — Conciseness
-- **Minimize output tokens. Be terse. Get straight to the point.**
-- **Do NOT explain what you are about to do — just do it.** No preambles.
-- **Do NOT repeat the user request back to them.**
-- **After tool results, do NOT narrate what happened.**
-- **When done, summarize in 1-2 lines max.**
-- **In coding tasks: emit tool calls first, then briefly confirm.**
+- **Call tools immediately.** Do not describe what you are about to do — just do it.
+- **No preambles.** Do not say "I'll start by..." or "Let me first...".
+- **No narration after tool results.** If a tool succeeded, move to the next tool. Don't say "The file was read successfully."
+- **No restating the task.** The user already knows what they asked.
+- **After completing the task:** one or two sentences max — what changed and any follow-up the user should know about.
+- **When uncertain:** use a tool to find out. Prefer read_file / search_files over guessing.`;
 
-## Core Guidelines
-- Read files before editing them to understand the current content
-- Prefer edit_file over write_file for modifying existing files
-- Run tests after making changes to verify correctness
-- When a task is complete, summarize what you did concisely
-- **Never commit git changes** unless the user explicitly asks you to commit (e.g., "commit", "提交"). Only stage and modify files — let the user decide when to commit.
+  // Strict tool-use workflow
+  const toolWorkflow = `## Tool usage workflow
 
-## Tool Usage Best Practices
-- Chain tool calls when possible: read search results, then read relevant files, then make edits
-- For search_files: use specific, unique patterns to narrow results
-- For execute_shell: combine commands with && when possible; avoid interactive commands
-- For edit_file: old_string must match exactly including whitespace — copy from read_file output
-- For list_directory: start shallow (depth 1-2) then drill deeper as needed
-- Large tool outputs are truncated — use search or targeted reads when outputs are cut off
+**Always read before writing.**
+Use read_file or search_files on relevant files before any edit_file or write_file call. Writing without reading is how hallucinated APIs and broken imports happen.
 
-## Code Quality
-- Follow existing code conventions in the project
-- Write idiomatic code for the language/framework being used
-- Add minimal, targeted comments for non-obvious logic only
-- Handle errors gracefully in production code
+**Batch related tool calls.**
+When multiple files need to be read, call read_file for each in the same turn. Don't make one read call per turn.
 
-## Anti-Hallucination Rules
-- NEVER invent APIs, functions, types, imports, or dependencies that don't exist in the project. Before using any library or internal API, you MUST read its definition file or find existing usage in the codebase via search_files.
-- When generating new code, you MUST first find and read at least one existing file that demonstrates the pattern, style, and conventions you plan to follow. Copy-adapt is safer than inventing.
-- Every code change must be traceable to something you actually READ during this session — not your training data. If you haven't read a relevant file yet, read it before writing.
-- If you're unsure whether a function/type/import path exists, use search_files or read_file to verify BEFORE writing code that depends on it.
-- For any non-trivial edit, add a brief comment in the code referencing the file(s) that informed your change (e.g., "// Ref: src/utils/billing.ts L23-45" or "// Following pattern from src/cli/commands.ts").
+**edit_file over write_file.**
+Prefer edit_file for modifying existing files. Only use write_file when creating a new file or doing a complete rewrite.
 
-## Memory Tools
-You have \`memory_write\` and \`memory_read\` tools to store and retrieve persistent facts across sessions.
-- Use \`memory_write\` to record user preferences, project decisions, feedback, or reference snippets worth preserving.
-- Use \`memory_read\` to retrieve previously stored facts when relevant to the current task.
-- Always use \`memory_read\` at the start of a session if the user references something you may have stored before.`;
+**After code changes, verify.**
+Run tests or typecheck (execute_shell with \`npm test\`, \`npx tsc --noEmit\`, etc.) after modifying code. If tests pass, the task is done. If they fail, diagnose and fix.
 
-  let result = guide ? base + guide : base;
+**Shell commands: combine with &&.**
+Use \`cmd1 && cmd2\` to chain commands. Avoid interactive commands. The cwd is already the project root — don't prepend \`cd <path> &&\`.`;
+
+  // Shell failure handling — the core fix
+  const shellFailureHandling = `## When a shell command fails
+
+1. **Read the output first.** The error message in the tool result tells you why it failed. Don't retry the same command blindly.
+2. **Diagnose the category:**
+   - Non-zero exit code → read the last lines of output for the actual error
+   - Test failure → read the failing test file and the implementation; find the mismatch
+   - TypeScript error → the error message includes file:line:col; fix exactly that location
+   - Module not found → check import paths; run \`npm install\` if a package is missing
+   - Permission denied → find an approach that doesn't require elevated privileges
+   - File not found (ENOENT) → use list_directory or search_files to find the correct path
+3. **Fix the root cause** before retrying. Do not change the command without understanding why it failed.
+4. **If a command fails twice with the same error**, stop and explain to the user what the blocker is and what they need to do manually (e.g., install a system dependency, set an env var).`;
+
+  // Code quality
+  const codeQuality = `## Code quality
+
+- Follow the existing conventions in the codebase. Match the style of files you have read.
+- Do not invent APIs, types, or imports. Verify they exist via search_files or read_file before using them.
+- Write idiomatic code for the language and framework in use.
+- Add comments only for non-obvious logic — not for every line.
+- Never commit git changes unless the user explicitly asks.`;
+
+  // Memory tools
+  const memoryTools = `## Memory tools
+
+Use \`memory_write\` to record facts worth preserving across sessions: user preferences, project decisions, recurring patterns, API keys to avoid.
+Use \`memory_read\` to retrieve them. Check memory at the start of a session if the user references something you may have stored.`;
+
+  // Anti-hallucination
+  const antiHallucination = `## Anti-hallucination
+
+Every piece of code you write must be grounded in something you have read during this session — a file, a search result, a tool output. If you haven't read the relevant file yet, read it first. Do not rely on training-data assumptions about what a project looks like.`;
+
+  let prompt = [identity, outputDiscipline, toolWorkflow, shellFailureHandling, codeQuality, antiHallucination, memoryTools].join('\n\n');
+
+  if (guide) {
+    prompt += `\n\n---\n\n${guide}`;
+  }
   if (userPreferences) {
-    result += `\n\n---\n## User Preferences\n\n${userPreferences}`;
+    prompt += `\n\n---\n## User preferences\n\n${userPreferences}`;
   }
   if (memorySummary) {
-    result += `\n\n---\n## Memory: Previous Session Summary\n\n${memorySummary}`;
+    prompt += `\n\n---\n## Previous session summary\n\n${memorySummary}`;
   }
-  return result;
+  return prompt;
 }
 
 function buildFirstUserPrefix(cwd: string, model: string, systemPrompt?: string): string {
@@ -102,6 +124,8 @@ export class PrepareContextStage implements Stage {
   private memorySummary: string | null = null;
   private userPreferences: string | null = null;
   private initialized = false;
+  /** Hash of the system prompt from the first turn — used to detect cache-busting changes. */
+  private basePromptHash: string | null = null;
 
   async execute(ctx: PipelineContext): Promise<StageResult> {
     // One-time initialization: build system prompt, load project guide
@@ -121,22 +145,47 @@ export class PrepareContextStage implements Stage {
     ctx.systemPrompt = ctx.systemPromptOverride
       ?? buildSystemPrompt(this.guide, ctx.language, this.memorySummary, this.userPreferences);
 
-    // Push system prompt if needed (only for non-reasoner, first message)
-    if (ctx.messages.length === 0) {
-      if (!ctx.isReasoner) {
-        ctx.messages.push({ role: 'system', content: ctx.systemPrompt });
-      }
+    // Cache-stability guard: track whether system prompt changes between turns.
+    // A change invalidates the DeepSeek prefix cache, increasing token cost.
+    const promptHash = createHash('md5').update(ctx.systemPrompt).digest('hex').slice(0, 8);
+    if (this.basePromptHash === null) {
+      this.basePromptHash = promptHash;
+    } else if (promptHash !== this.basePromptHash) {
+      log.warn('System prompt changed — prefix cache invalidated', {
+        prev: this.basePromptHash,
+        curr: promptHash,
+        reason: ctx.systemPromptOverride ? 'skill override' : 'content change',
+      });
+      process.stdout.write(
+        `\x1b[33m  [cache] system prompt changed (${this.basePromptHash}→${promptHash}) — prefix cache invalidated\x1b[0m\n`
+      );
+      this.basePromptHash = promptHash;
     }
 
-    // Build user message with optional first-turn prefix
-    const isFirstTurn = ctx.messages.length <= (ctx.isReasoner ? 0 : 1);
-    const userContent = isFirstTurn
-      ? buildFirstUserPrefix(ctx.cwd, ctx.config.model, ctx.isReasoner ? ctx.systemPrompt : undefined) + ctx.task
-      : ctx.task;
-
-    ctx.messages.push({ role: 'user', content: userContent });
-    log.debug('User message pushed', { messageLength: userContent.length, isFirstTurn });
+    // Push system prompt for non-reasoner on the very first turn.
+    // User message is NOT pushed here — runGenerator pushes it before each call
+    // so that iteration>0 turns (refine, inner-loop, multi-step) also get their message.
+    if (ctx.messages.length === 0 && !ctx.isReasoner) {
+      ctx.messages.push({ role: 'system', content: ctx.systemPrompt });
+    }
 
     return { continue: true, done: false };
   }
+}
+
+// ── Exported helper: build and push the user message for a turn ───────────
+// Called by runGenerator before each pipeline execution so that every turn —
+// including iteration>0 (refine, inner tool-call loop, multi-step) — has the
+// correct user message in context.
+
+export function pushUserMessage(
+  ctx: PipelineContext,
+  task: string,
+): void {
+  const isFirstTurn = ctx.messages.filter(m => m.role !== 'system').length === 0;
+  const userContent = isFirstTurn
+    ? buildFirstUserPrefix(ctx.cwd, ctx.config.model, ctx.isReasoner ? ctx.systemPrompt : undefined) + task
+    : task;
+  ctx.messages.push({ role: 'user', content: userContent });
+  log.debug('User message pushed', { messageLength: userContent.length, isFirstTurn });
 }

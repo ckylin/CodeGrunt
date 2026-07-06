@@ -41,6 +41,99 @@ const ERROR_PATTERNS = [
   /\[no changes\]/,
 ];
 
+// ── Shell failure classifier ──────────────────────────────────────────────
+// Turns a raw shell output string into a targeted suggestion so the model
+// doesn't receive a generic "check your parameters" hint.
+
+interface ShellDiagnosis {
+  issue: string;
+  suggestion: string;
+}
+
+function classifyShellFailure(content: string): ShellDiagnosis {
+  // Extract the output body (everything after "Output:\n" if present)
+  const outputBody = content.includes('\n\nOutput:\n')
+    ? content.split('\n\nOutput:\n')[1] ?? content
+    : content;
+
+  // Test failures (jest / vitest / mocha / pytest)
+  if (/\b(FAIL|FAILED|AssertionError|expect\(|● )/m.test(outputBody)) {
+    const failLine = outputBody.split('\n').find(l => /FAIL|●/.test(l)) ?? '';
+    return {
+      issue: `测试失败: ${failLine.trim().slice(0, 120)}`,
+      suggestion: '读取失败的测试文件，分析断言错误原因，修复实现代码后重新运行测试',
+    };
+  }
+
+  // TypeScript / compilation errors
+  if (/error TS\d+/.test(outputBody)) {
+    const errLine = outputBody.split('\n').find(l => /error TS/.test(l)) ?? '';
+    return {
+      issue: `TypeScript 编译错误: ${errLine.trim().slice(0, 120)}`,
+      suggestion: '修复 TypeScript 类型错误，使用 read_file 查看相关文件的类型定义',
+    };
+  }
+
+  // Module not found
+  if (/Cannot find module|Module not found|ERR_MODULE_NOT_FOUND/.test(outputBody)) {
+    return {
+      issue: '模块未找到',
+      suggestion: '确认 import 路径是否正确，是否需要安装依赖（npm install）',
+    };
+  }
+
+  // Permission errors
+  if (/EACCES|EPERM|Permission denied/.test(outputBody)) {
+    return {
+      issue: '权限不足',
+      suggestion: '检查文件/目录权限，或尝试使用不需要 sudo 的路径',
+    };
+  }
+
+  // File not found
+  if (/ENOENT|No such file/.test(outputBody)) {
+    const pathMatch = outputBody.match(/ENOENT[^']*'([^']+)'/);
+    const missingPath = pathMatch?.[1] ?? '';
+    return {
+      issue: `文件不存在${missingPath ? `: ${missingPath}` : ''}`,
+      suggestion: '使用 list_directory 或 search_files 确认路径，再重新执行',
+    };
+  }
+
+  // Syntax errors
+  if (/SyntaxError|ParseError/.test(outputBody)) {
+    return {
+      issue: 'Syntax 错误',
+      suggestion: '检查最近写入的代码中是否有语法错误（括号不匹配、缺少分号等）',
+    };
+  }
+
+  // Timeout
+  if (/Command timed out/.test(content)) {
+    return {
+      issue: '命令超时',
+      suggestion: '命令耗时过长，考虑拆分操作或增加 timeout_ms 参数',
+    };
+  }
+
+  // Generic non-zero exit
+  const exitCodeMatch = content.match(/Command exited with code (\d+)/);
+  if (exitCodeMatch) {
+    const snippet = outputBody.trim().split('\n').slice(-5).join(' ').slice(0, 200);
+    return {
+      issue: `命令退出码 ${exitCodeMatch[1]}${snippet ? `，末尾输出: ${snippet}` : ''}`,
+      suggestion: '分析上方输出中的错误信息，找到根本原因后修复',
+    };
+  }
+
+  // Fallback
+  const snippet = outputBody.trim().slice(0, 150).replace(/\n/g, ' ');
+  return {
+    issue: `工具调用失败: ${snippet}`,
+    suggestion: '检查工具参数是否正确，文件路径是否存在',
+  };
+}
+
 // ── TypeScript typecheck helper ───────────────────────────────────────────
 
 function runTsc(cwd: string): Promise<{ exitCode: number; output: string }> {
@@ -66,7 +159,7 @@ function runTsc(cwd: string): Promise<{ exitCode: number; output: string }> {
 
 function structuralChecks(
   currentTurnToolCalls: Array<{ name: string; args: string }>,
-  currentTurnToolResults: Array<{ content: string }>,
+  currentTurnToolResults: Array<{ content: string; toolName?: string }>,
   sessionHasRead: boolean,
   assistantText: string,
 ): EvaluationResult {
@@ -76,14 +169,23 @@ function structuralChecks(
   let requiresRetry = false;
   let score = 90;
 
-  // Check 1: Tool result errors — real failure, retry makes sense
-  const errorMatch = currentTurnToolResults.find(tr =>
+  // Check 1: Tool result errors — diagnose specifically for shell vs other tools
+  const errorEntry = currentTurnToolResults.find(tr =>
     ERROR_PATTERNS.some(p => p.test(tr.content))
   );
-  if (errorMatch) {
-    const snippet = errorMatch.content.slice(0, 120).replace(/\n/g, ' ');
-    issues.push(`工具调用返回了错误: ${snippet}`);
-    suggestions.push('检查工具参数是否正确，文件路径是否存在');
+  if (errorEntry) {
+    const isShell = errorEntry.toolName === 'execute_shell'
+      || /Command exited|Command timed|ENOENT|EACCES/.test(errorEntry.content);
+
+    if (isShell) {
+      const diagnosis = classifyShellFailure(errorEntry.content);
+      issues.push(diagnosis.issue);
+      suggestions.push(diagnosis.suggestion);
+    } else {
+      const snippet = errorEntry.content.slice(0, 120).replace(/\n/g, ' ');
+      issues.push(`工具调用返回了错误: ${snippet}`);
+      suggestions.push('检查工具参数是否正确，文件路径是否存在');
+    }
     passed = false;
     requiresRetry = true;
     score -= 40;
@@ -127,7 +229,7 @@ export interface EvaluateStepInput {
   /** Tool calls made specifically in this generator turn */
   currentTurnToolCalls: Array<{ name: string; args: string }>;
   /** Tool results from this generator turn */
-  currentTurnToolResults: Array<{ content: string }>;
+  currentTurnToolResults: Array<{ content: string; toolName?: string }>;
   language: 'zh' | 'en';
   /** Working directory — used for TypeScript typecheck after write/edit */
   cwd?: string;

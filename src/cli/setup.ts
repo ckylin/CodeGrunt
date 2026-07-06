@@ -19,12 +19,17 @@ export const DEEPSEEK_MODELS: Array<{ id: string; label: string; description: st
   {
     id: 'deepseek-v4-flash',
     label: 'DeepSeek V4 Flash',
-    description: 'Fast & cheap, great for most coding tasks',
+    description: 'Fast & cheap — used for classification and planning',
   },
   {
     id: 'deepseek-v4-pro',
     label: 'DeepSeek V4 Pro',
-    description: 'Most capable, best for complex reasoning',
+    description: 'Most capable, best for complex multi-step tasks',
+  },
+  {
+    id: 'deepseek-reasoner',
+    label: 'DeepSeek R1 Reasoner',
+    description: 'Chain-of-thought reasoning, 1M context — for hard problems',
   },
 ];
 
@@ -84,12 +89,14 @@ export async function runSetup(existingConfig: CodeGruntConfig): Promise<CodeGru
       {
         apiKey,
         model,
+        baseURL: config.baseURL,
         maxTokens: config.maxTokens,
         temperature: config.temperature,
         reasoningEffort: config.reasoningEffort,
         topP: config.topP,
         frequencyPenalty: config.frequencyPenalty,
         presencePenalty: config.presencePenalty,
+        trustMode: config.trustMode,
       },
       null,
       2,

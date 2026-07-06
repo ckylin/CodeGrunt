@@ -107,6 +107,13 @@ ${task}`;
   return formatInstruction;
 }
 
+// ── Light model selection ─────────────────────────────────────────────────
+// Planning outputs structured JSON — flash is sufficient and much cheaper.
+function selectLightModel(configuredModel: string): string {
+  if (configuredModel.startsWith('deepseek-')) return 'deepseek-v4-flash';
+  return configuredModel;
+}
+
 // ── Plan Parsing ─────────────────────────────────────────────────────────
 
 function extractJsonBlock(text: string): string | null {
@@ -206,9 +213,9 @@ export async function generatePlan(
   try {
     let fullText = '';
     const stream = provider.stream(messages, {
-      model: model,
-      maxTokens: 2048,
-      temperature: 0.1, // Low temperature for structured planning
+      model: selectLightModel(model),
+      maxTokens: 1024,
+      temperature: 0.1,
       signal,
     });
 

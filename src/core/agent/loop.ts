@@ -25,7 +25,7 @@ import ora from 'ora';
 import { ContextManager } from '../context/manager.js';
 import { loadProjectGuide } from '../context/project-guide.js';
 import { getToolDefinitions } from '../tools/registry.js';
-import { resetYesAll, isYesAllActive } from '../pipeline/stages/process-tools-helpers.js';
+import { resetYesAll, isYesAllActive, setTrustMode } from '../pipeline/stages/process-tools-helpers.js';
 import { confirmYesNo } from '../../utils/confirm.js';
 import { detectInputLanguage } from '../memory/habits.js';
 import type { TurnSignal } from '../../types.js';
@@ -40,9 +40,11 @@ import { detectSystemLanguage } from '../../utils/locale.js';
 import { compactMessages } from '../context/compact.js';
 import { isReasonerModel } from '../../config.js';
 import { saveSessionSummary } from '../memory/store.js';
+import { getHookRegistry } from '../hooks/registry.js';
+import { createSnapshot } from '../snapshot/index.js';
 
 // ── P/G/E modules ────────────────────────────────────────────────────────
-import { detectIntent } from './intentor.js';
+import { detectIntent, selectModelForTask } from './intentor.js';
 import { generatePlan } from './planner.js';
 import { evaluateStep } from './evaluator.js';
 import type { TaskPlan, EvaluationResult, IntentResult } from '../pipeline/types.js';
@@ -54,7 +56,7 @@ import {
 } from '../pipeline/engine.js';
 import type { PipelineContext } from '../pipeline/types.js';
 import type { StreamEmitter } from '../pipeline/types.js';
-import { PrepareContextStage } from '../pipeline/stages/prepare-context.js';
+import { PrepareContextStage, pushUserMessage } from '../pipeline/stages/prepare-context.js';
 import { StreamResponseStage } from '../pipeline/stages/stream-response.js';
 import { ProcessToolCallsStage } from '../pipeline/stages/process-tools.js';
 import { PostProcessStage } from '../pipeline/stages/post-process.js';
@@ -198,6 +200,7 @@ async function runGenerator(
   iteration: number,
   stepDescription?: string,
   sessionHasRead = false,
+  prepareStage?: PrepareContextStage,
 ): Promise<GeneratorResult> {
   const { task, cwd, config, provider, onText, signal } = options;
   const toolDefs = getToolDefinitions();
@@ -207,8 +210,12 @@ async function runGenerator(
   const builder = new PipelineBuilder()
     .name(`agent-turn-${iteration}`);
 
+  // PrepareContextStage runs only on the very first iteration of a session
+  // (iteration=0). It initialises the system prompt and pushes the system
+  // message once. User messages are pushed below for EVERY call so that
+  // refine-loop turns and multi-step turns also receive the right instruction.
   if (iteration === 0) {
-    builder.addStage(new PrepareContextStage());
+    builder.addStage(prepareStage ?? new PrepareContextStage());
   }
 
   const emitter = new UIStreamEmitter(iteration, onText);
@@ -218,20 +225,20 @@ async function runGenerator(
 
   const pipeline = builder.build();
 
-  // If we have a step description, use it as the primary instruction with
-  // the original task demoted to background context. This prevents the model
-  // from trying to complete all steps in the first turn.
   const effectiveTask = stepDescription
     ? `## Current Step\n${stepDescription}\n\n## Background Context\n${task}`
     : task;
+
+  // Snapshot the current messages. If pipeline throws, context stays clean.
+  const messageSnapshot = [...context.getMessages()];
 
   const pipeCtx: PipelineContext = {
     cwd,
     config,
     provider,
-    messages: context.getMessages(),
+    messages: messageSnapshot,
     systemPrompt: '',
-    isReasoner: false,
+    isReasoner: isReasonerModel(config.model),
     task: effectiveTask,
     toolDefinitions: toolDefs,
     signal,
@@ -250,7 +257,29 @@ async function runGenerator(
     userPreferences: options.userPreferences,
   };
 
-  const result = await engine.execute(pipeline, pipeCtx);
+  // Push the user message for this turn. PrepareContextStage handles iteration=0
+  // (with cwd prefix + reasoner system embed); for subsequent iterations we push
+  // directly so every turn — refine, inner-loop, multi-step — has its instruction.
+  if (iteration > 0) {
+    pushUserMessage(pipeCtx, effectiveTask);
+  }
+
+  let result;
+  try {
+    result = await engine.execute(pipeline, pipeCtx);
+  } catch (err) {
+    // Pipeline threw — do NOT write back the half-modified snapshot
+    return {
+      pipeCtx,
+      done: false,
+      userRejected: false,
+      error: err instanceof Error ? err : new Error(String(err)),
+      stopReason: 'stop',
+      hasReadThisTurn: pipeCtx.hasReadThisTurn,
+    };
+  }
+
+  // Pipeline completed — write back to context manager
   context.setMessages(pipeCtx.messages);
 
   return {
@@ -273,12 +302,15 @@ export async function runAgentLoop(options: AgentRunOptions): Promise<void> {
   const model = config.model;
 
   const context = options.context ?? new ContextManager(CHAT_CONTEXT_BUDGET);
-  const lang = detectSystemLanguage();
+  // Language is detected once at REPL startup and passed in via options.
+  // Fall back to detectSystemLanguage() only if not provided (e.g. in tests).
+  const lang = options.language ?? detectSystemLanguage();
   const metrics = getDefaultMetrics();
   const bus = getDefaultEventBus();
   metrics.increment('agent.turns');
 
   resetYesAll();
+  setTrustMode(options.config.trustMode ?? 'code');
 
   // Auto-compact: if the context flagged itself as near-capacity on the previous
   // turn, summarize before running the next agent turn so history is preserved
@@ -321,6 +353,16 @@ export async function runAgentLoop(options: AgentRunOptions): Promise<void> {
   printIntentResult(intent);
   log.info('Intent classified', { isCoding: intent.isCoding, confidence: intent.confidence, matchedSkill: intent.matchedSkill?.name });
 
+  // Auto-route to the appropriate model tier based on task complexity.
+  // Only affects deepseek-v4-* variants; leaves other models unchanged.
+  const routedModel = selectModelForTask(model, task, intent);
+  let activeOptions = options;
+  if (routedModel !== model) {
+    process.stdout.write(chalk.gray(`  [auto-route: ${model} → ${routedModel}]\n`));
+    log.info('Model auto-routed', { from: model, to: routedModel });
+    activeOptions = { ...options, config: { ...config, model: routedModel } };
+  }
+
   // Subscribe to tool:result events to collect per-turn confirmation stats
   const turnStats = { toolCallCount: 0, confirmations: 0, rejections: 0 };
   const unsubToolResult = bus.on<import('../events/bus.js').ToolResultEvent>('tool:result', (e) => {
@@ -332,11 +374,11 @@ export async function runAgentLoop(options: AgentRunOptions): Promise<void> {
   let responseLength = 0;
   try {
     if (intent.matchedSkill) {
-      ({ responseLength } = await runSkillFlow(options, context, lang, intent.matchedSkill, metrics));
+      ({ responseLength } = await runSkillFlow(activeOptions, context, lang, intent.matchedSkill, metrics));
     } else if (intent.isCoding) {
-      ({ responseLength } = await runCodingFlow(options, context, lang, intent, metrics, bus));
+      ({ responseLength } = await runCodingFlow(activeOptions, context, lang, intent, metrics, bus));
     } else {
-      ({ responseLength } = await runChatFlow(options, context, lang, metrics));
+      ({ responseLength } = await runChatFlow(activeOptions, context, lang, metrics));
     }
   } finally {
     unsubToolResult();
@@ -354,6 +396,20 @@ export async function runAgentLoop(options: AgentRunOptions): Promise<void> {
       aborted:         signal?.aborted ?? false,
     };
     options.onTurnComplete?.(signal_);
+
+    // ── Auto-snapshot ────────────────────────────────────────────────
+    // Silently create a side-git snapshot after each coding turn so the
+    // user can /restore if something goes wrong. Chat-only turns are skipped.
+    if (signal_.isCoding || signal_.toolCallCount > 0) {
+      createSnapshot(options.cwd, options.task).catch(() => {});
+    }
+
+    // ── Stop hook ────────────────────────────────────────────────────
+    await getHookRegistry().run({
+      event: 'stop',
+      cwd: options.cwd,
+      response_length: responseLength,
+    });
   }
 }
 
@@ -371,7 +427,6 @@ async function runSkillFlow(
   log.info('Skill flow', { skill: skill.name });
   process.stdout.write(chalk.gray(`  skill: ${skill.name}\n`));
 
-  // Prepend skill content to the user task so the model has full context
   const skillTask = `${skill.content}\n\n---\n${options.task}`;
   const skillOptions: AgentRunOptions = {
     ...options,
@@ -379,19 +434,19 @@ async function runSkillFlow(
     systemPromptOverride: skill.system,
   };
 
-  const genResult = await runGenerator(context, skillOptions, lang, 0);
+  const prepareStage = new PrepareContextStage();
+  const genResult = await runGenerator(context, skillOptions, lang, 0, undefined, false, prepareStage);
 
   if (genResult.userRejected) { log.info('Skill flow ended — user rejected'); return { responseLength: 0 }; }
   if (genResult.error) throw genResult.error;
 
   displayToolCalls(genResult.pipeCtx, onToolCall, onToolResult);
 
-  // Continue if the model made tool calls
   let iteration = 1;
   let current = genResult;
   while (!current.done && current.pipeCtx.toolCalls.length > 0 && iteration < MAX_ITERATIONS) {
     if (signal?.aborted) break;
-    current = await runGenerator(context, skillOptions, lang, iteration);
+    current = await runGenerator(context, skillOptions, lang, iteration, undefined, false, prepareStage);
     if (current.userRejected) break;
     if (current.error) throw current.error;
     displayToolCalls(current.pipeCtx, onToolCall, onToolResult);
@@ -481,6 +536,11 @@ async function runCodingFlow(
   let finalAssistantText = '';
   let userRejected = false;
   let sessionHasRead = false;
+  // One PrepareContextStage instance shared across all steps/retries so system
+  // prompt is only loaded once and the cache-stability guard works correctly.
+  const prepareStage = new PrepareContextStage();
+  // Global iteration counter — ensures iteration=0 only on the very first call.
+  let globalIter = 0;
 
   for (let stepIdx = 0; stepIdx < plan.steps.length; stepIdx++) {
     if (signal?.aborted) break;
@@ -498,54 +558,57 @@ async function runCodingFlow(
         ? `Step ${step.id}/${plan.steps.length}: ${step.description}\nExpected: ${step.expectedOutcome}`
         : `RETRY Step ${step.id}: ${step.description}\nPrevious issues:\n${(lastEval?.issues ?? []).map(i => `- ${i}`).join('\n')}\n\nSuggestions:\n${(lastEval?.suggestions ?? []).map(s => `- ${s}`).join('\n')}\n\nPlease fix the issues and re-execute.`;
 
-      // Run the generator and keep iterating within this step as long as the
-      // model continues making tool calls (mirrors the runChatFlow while loop).
       let genResult = await runGenerator(
-        context,
-        options,
-        lang,
-        stepIdx * (MAX_REFINE_RETRIES + 1) + refineCount,
-        stepDesc,
-        sessionHasRead,
+        context, options, lang, globalIter++, stepDesc, sessionHasRead, prepareStage,
       );
 
       if (genResult.hasReadThisTurn) sessionHasRead = true;
-
       if (genResult.userRejected) { userRejected = true; break; }
       if (genResult.error) { log.error('Generator error', { error: genResult.error.message }); throw genResult.error; }
-
       displayToolCalls(genResult.pipeCtx, onToolCall, onToolResult);
+
+      // Accumulate ALL tool calls/results across inner iterations so the
+      // evaluator sees the full picture (e.g. read in iter 1, write in iter 2).
+      const allToolCalls: Array<{ name: string; args: string; id: string }> = [
+        ...genResult.pipeCtx.toolCalls.map(tc => ({ name: tc.function.name, args: tc.function.arguments, id: tc.id })),
+      ];
+      const allToolMessages: Array<{ content: string; tool_call_id: string }> = genResult.pipeCtx.messages
+        .filter(m => m.role === 'tool' && 'tool_call_id' in m)
+        .map(m => ({ content: String(m.content), tool_call_id: (m as import('../../types.js').ToolResultMessage).tool_call_id }));
 
       {
         let innerIter = 1;
         while (!genResult.done && genResult.pipeCtx.toolCalls.length > 0 && innerIter < MAX_ITERATIONS) {
           if (signal?.aborted) break;
           const next = await runGenerator(
-            context,
-            options,
-            lang,
-            stepIdx * (MAX_REFINE_RETRIES + 1) * MAX_ITERATIONS + innerIter,
-            stepDesc,
-            sessionHasRead,
+            context, options, lang, globalIter++, stepDesc, sessionHasRead, prepareStage,
           );
           if (next.hasReadThisTurn) sessionHasRead = true;
           if (next.userRejected) { userRejected = true; break; }
           if (next.error) throw next.error;
           displayToolCalls(next.pipeCtx, onToolCall, onToolResult);
+
+          // Accumulate new tool calls/results from this inner iteration
+          for (const tc of next.pipeCtx.toolCalls) {
+            allToolCalls.push({ name: tc.function.name, args: tc.function.arguments, id: tc.id });
+          }
+          for (const m of next.pipeCtx.messages.filter(m => m.role === 'tool' && 'tool_call_id' in m)) {
+            allToolMessages.push({ content: String(m.content), tool_call_id: (m as import('../../types.js').ToolResultMessage).tool_call_id });
+          }
+
           genResult = next;
           innerIter++;
         }
         if (userRejected) break;
       }
 
-      // Extract current-turn tool calls and results for the evaluator
-      const currentTurnToolCalls = genResult.pipeCtx.toolCalls.map(tc => ({
-        name: tc.function.name,
-        args: tc.function.arguments,
+      // Build evaluator inputs from the cumulative tool calls/results
+      const currentTurnToolCalls = allToolCalls.map(tc => ({ name: tc.name, args: tc.args }));
+      const toolCallById = new Map(allToolCalls.map(tc => [tc.id, tc.name]));
+      const currentTurnToolResults = allToolMessages.map(m => ({
+        content: m.content,
+        toolName: toolCallById.get(m.tool_call_id),
       }));
-      const currentTurnToolResults = genResult.pipeCtx.messages
-        .filter(m => m.role === 'tool' && 'tool_call_id' in m)
-        .map(m => ({ content: String(m.content) }));
 
       const evaluation = await evaluateStep(provider, model, {
         planStep: step,
@@ -635,28 +698,25 @@ async function runChatFlow(
 
   log.info('Phase 1 (chat): direct generation — no Evaluator');
 
-  const genResult = await runGenerator(context, options, lang, 0);
+  const prepareStage = new PrepareContextStage();
+  const genResult = await runGenerator(context, options, lang, 0, undefined, false, prepareStage);
 
   if (genResult.userRejected) { log.info('Chat flow ended — user rejected'); return { responseLength: 0 }; }
   if (genResult.error) throw genResult.error;
 
   displayToolCalls(genResult.pipeCtx, onToolCall, onToolResult);
 
-  // If the model made tool calls (e.g. read_file for context), continue
-  // iterating until it stops — same as the old single-step loop.
   let iteration = 1;
   let current = genResult;
   while (!current.done && current.pipeCtx.toolCalls.length > 0 && iteration < MAX_ITERATIONS) {
     if (signal?.aborted) break;
-    current = await runGenerator(context, options, lang, iteration);
+    current = await runGenerator(context, options, lang, iteration, undefined, false, prepareStage);
     if (current.userRejected) break;
     if (current.error) throw current.error;
     displayToolCalls(current.pipeCtx, onToolCall, onToolResult);
     iteration++;
   }
 
-  // If the final turn produced no visible text, print a fallback so the user
-  // knows the turn completed (avoids silent no-op when the model returns empty).
   const finalText = current.pipeCtx.assistantText;
   if (!finalText && current.pipeCtx.toolCalls.length === 0) {
     const fallback = lang === 'zh'

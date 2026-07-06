@@ -2,8 +2,10 @@
 // Extracted from src/core/tools/executor.ts — provides the confirm-or-skip
 // flow for destructive tools and delegates to tool implementations.
 //
-// This is kept separate from the ProcessToolCallsStage so it can be tested
-// independently and reused if needed.
+// This file also implements tool-call JSON repair: when the model emits
+// malformed JSON arguments, repairToolArgs() attempts to salvage a usable
+// object before giving up. This preserves the message prefix (no retry turn)
+// and avoids a cache-busting round-trip.
 
 import { readFile } from 'fs/promises';
 import { existsSync } from 'fs';
@@ -12,9 +14,58 @@ import type { ToolResult } from '../../../types.js';
 import { getToolByName } from '../../tools/registry.js';
 import { confirmEdit, applyEdit } from '../../../utils/confirm.js';
 
+// ── Tool-call JSON repair ─────────────────────────────────────────────────
+//
+// DeepSeek (especially R1) occasionally emits malformed JSON in tool arguments:
+// truncated strings, trailing commas, unquoted keys, or markdown fences.
+// Rather than failing the entire turn and forcing a cache-busting retry,
+// we attempt progressively more aggressive salvage strategies.
+
+/**
+ * Attempt to parse argsJson, with fallback repair strategies:
+ * 1. Standard JSON.parse
+ * 2. Strip markdown code fences (```json ... ```)
+ * 3. Extract the first {...} block via regex
+ * 4. Replace common JSON mistakes: trailing commas, unquoted keys
+ * Returns parsed object on success, null if all strategies fail.
+ */
+export function repairToolArgs(argsJson: string): Record<string, unknown> | null {
+  // Strategy 1: standard parse
+  try {
+    return JSON.parse(argsJson) as Record<string, unknown>;
+  } catch { /* fall through */ }
+
+  let s = argsJson.trim();
+
+  // Strategy 2: strip markdown fences
+  s = s.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '').trim();
+  try {
+    return JSON.parse(s) as Record<string, unknown>;
+  } catch { /* fall through */ }
+
+  // Strategy 3: extract first {...} block
+  const braceMatch = s.match(/\{[\s\S]*\}/);
+  if (braceMatch) {
+    try {
+      return JSON.parse(braceMatch[0]) as Record<string, unknown>;
+    } catch { /* fall through */ }
+
+    // Strategy 4: fix trailing commas and unquoted keys in extracted block
+    const fixed = braceMatch[0]
+      .replace(/,\s*([}\]])/g, '$1')           // trailing commas
+      .replace(/([{,]\s*)([a-zA-Z_]\w*)\s*:/g, '$1"$2":');  // unquoted keys
+    try {
+      return JSON.parse(fixed) as Record<string, unknown>;
+    } catch { /* fall through */ }
+  }
+
+  return null;
+}
+
 // ── Module-level "yes for all" state ──────────────────────────────────────
 
 let yesAllSessionActive = false;
+let currentTrustMode: 'plan' | 'code' | 'auto' = 'code';
 
 export function resetYesAll(): void {
   yesAllSessionActive = false;
@@ -22,6 +73,16 @@ export function resetYesAll(): void {
 
 export function isYesAllActive(): boolean {
   return yesAllSessionActive;
+}
+
+export function setTrustMode(mode: 'plan' | 'code' | 'auto'): void {
+  currentTrustMode = mode;
+  // auto mode is equivalent to yes-for-all
+  if (mode === 'auto') yesAllSessionActive = true;
+}
+
+export function getTrustMode(): 'plan' | 'code' | 'auto' {
+  return currentTrustMode;
 }
 
 // ── Confirm helper ─────────────────────────────────────────────────────────
@@ -59,11 +120,11 @@ export async function executeToolCall(
   }
 
   let args: Record<string, unknown>;
-  try {
-    args = JSON.parse(argsJson) as Record<string, unknown>;
-  } catch {
-    return { success: false, output: '', error: `Invalid JSON arguments for tool ${name}: ${argsJson}` };
+  const parsed = repairToolArgs(argsJson);
+  if (parsed === null) {
+    return { success: false, output: '', error: `Could not parse tool arguments for ${name}: ${argsJson.slice(0, 200)}` };
   }
+  args = parsed;
 
   // Validate required parameters
   const requiredParams: Record<string, string[]> = {
@@ -80,6 +141,17 @@ export async function executeToolCall(
         return { success: false, output: '', error: `Missing required parameter "${p}" for tool ${name}` };
       }
     }
+  }
+
+  // ── Plan mode: block all destructive operations ───────────────────────
+  const DESTRUCTIVE_TOOLS = new Set(['write_file', 'edit_file', 'execute_shell']);
+  if (currentTrustMode === 'plan' && DESTRUCTIVE_TOOLS.has(name)) {
+    return {
+      success: false,
+      output: '',
+      error: `[plan mode] Tool "${name}" is blocked in plan (read-only) mode. Switch to code or auto mode with /trust.`,
+      userRejected: true,
+    };
   }
 
   // ── Confirm flow for destructive operations ────────────────────────────

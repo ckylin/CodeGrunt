@@ -6,6 +6,7 @@ issue/
 docs/VERSION.md
 .claude/
 .vscode/
+.codegrunt/
 
 # ── 临时调试/测试脚本（以 _ 前缀命名，调试完应删除）──
 _fix*

@@ -1,10 +1,13 @@
 import type { Message } from '../../types.js';
 
 const CHARS_PER_TOKEN = 4;
-// Trigger auto-compact when estimated tokens exceed this fraction of the budget.
+// Signal compaction when estimated tokens exceed this fraction of the budget.
 const AUTO_COMPACT_THRESHOLD = 0.50;
-// Also trigger when non-system message count exceeds this number.
+// Also signal when non-system message count exceeds this number.
 const AUTO_COMPACT_MESSAGE_COUNT = 30;
+// Emergency hard limit: only splice when tokens exceed budget by this factor.
+// Keeps prefix cache intact in normal operation; prevents OOM in extreme cases.
+const EMERGENCY_TRIM_FACTOR = 2.0;
 
 export class ContextManager {
   private messages: Message[] = [];
@@ -94,6 +97,10 @@ export class ContextManager {
   private trim(): void {
     const tokens = this.estimateTokens();
     const nonSystemCount = this.messages.filter(m => m.role !== 'system').length;
+
+    // Signal that compaction is needed — do NOT splice here.
+    // Splicing old messages shifts the prefix and invalidates DeepSeek's KV cache.
+    // The caller (agent loop) is responsible for running compact() before the next turn.
     if (
       tokens > this.tokenBudget * AUTO_COMPACT_THRESHOLD ||
       nonSystemCount > AUTO_COMPACT_MESSAGE_COUNT
@@ -101,12 +108,17 @@ export class ContextManager {
       this.needsCompact = true;
     }
 
-    const hasSystem = this.messages[0]?.role === 'system';
-    const startIdx = hasSystem ? 1 : 0;
-    // Keep system + at least the last 4 messages (user/assistant/tool pairs)
-    const minMessages = hasSystem ? 5 : 4;
-    while (this.estimateTokens() > this.tokenBudget && this.messages.length > minMessages) {
-      this.removeOldestGroup(startIdx);
+    // Emergency hard limit: only splice when grossly over budget (e.g. a single
+    // massive tool result). This is a last resort — normal sessions should never
+    // hit this path because compact() is triggered well before this point.
+    const hardLimit = this.tokenBudget * EMERGENCY_TRIM_FACTOR;
+    if (this.estimateTokens() > hardLimit) {
+      const hasSystem = this.messages[0]?.role === 'system';
+      const startIdx = hasSystem ? 1 : 0;
+      const minMessages = hasSystem ? 5 : 4;
+      while (this.estimateTokens() > hardLimit && this.messages.length > minMessages) {
+        this.removeOldestGroup(startIdx);
+      }
     }
   }
 

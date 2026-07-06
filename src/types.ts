@@ -108,6 +108,17 @@ export interface CodeGruntConfig {
   frequencyPenalty?: number;
   /** Penalize new tokens based on presence */
   presencePenalty?: number;
+  /**
+   * Trust mode controls how destructive tool calls are handled:
+   * - plan: read-only — execute_shell and all write tools are blocked
+   * - code: require confirmation for each destructive operation (default)
+   * - auto: auto-approve all operations (session-wide yes-for-all)
+   */
+  trustMode?: 'plan' | 'code' | 'auto';
+  /** Web search engine: 'mojeek' (default) | 'searxng' | 'duckduckgo' */
+  searchEngine?: 'mojeek' | 'searxng' | 'duckduckgo';
+  /** SearXNG instance URL — used when searchEngine is 'searxng' */
+  searxngUrl?: string;
 }
 
 // ── Habit tracking ──────────────────────────────────────────────────────────
@@ -141,6 +152,8 @@ export interface AgentRunOptions {
   memorySummary?: string;
   /** Formatted user habit preferences — injected into system prompt above session summary. */
   userPreferences?: string;
+  /** System language, detected once at REPL startup. Defaults to 'en' if omitted. */
+  language?: 'zh' | 'en';
   onText?: (text: string) => void;
   onToolCall?: (name: string, args: Record<string, unknown>) => void;
   onToolResult?: (name: string, result: ToolResult) => void;

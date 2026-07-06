@@ -8,10 +8,15 @@ import { printError } from '../utils/display.js';
 import { resolveAtReferences } from './at-resolver.js';
 import { handleSlashCommand } from './commands.js';
 import { printBanner } from './banner.js';
+import { getMcpManager } from '../core/mcp/manager.js';
+import { getToolRegistry } from '../core/tools/registry.js';
 import { readMultilineInput } from './input.js';
 import { loadSkills } from './skills.js';
 import { saveConfig, supportsReasoning, CONTEXT_BUDGET, CHAT_CONTEXT_BUDGET } from '../config.js';
 import { loadSessionSummary, readEntries } from '../core/memory/store.js';
+import { saveSession, listSessions, loadSession, formatSessionEntry } from '../core/session/store.js';
+import { selectFromList } from '../utils/select.js';
+import { detectSystemLanguage } from '../utils/locale.js';
 import {
   createInitialHabitState, observeTurn, analyzeHabits, persistHabitUpdates,
   type HabitState,
@@ -21,10 +26,15 @@ import type { CodeGruntConfig, LLMProvider } from '../types.js';
 // ── Harness-style: Pipeline / Events / Observability ─────────────────────
 import { getLogger } from '../core/observability/logger.js';
 import { getDefaultMetrics } from '../core/observability/metrics.js';
+import { getHookRegistry } from '../core/hooks/registry.js';
 
 const log = getLogger('repl');
 
-export async function startRepl(initialConfig: CodeGruntConfig, initialProvider: LLMProvider): Promise<void> {
+export async function startRepl(
+  initialConfig: CodeGruntConfig,
+  initialProvider: LLMProvider,
+  resumeSessionId?: string,
+): Promise<void> {
   if (!process.stdin.isTTY) {
     process.stderr.write('Error: interactive REPL requires a TTY. Use `codegrunt "<task>"` for non-interactive mode.\n');
     process.exit(1);
@@ -33,10 +43,40 @@ export async function startRepl(initialConfig: CodeGruntConfig, initialProvider:
   const cwd = process.cwd();
   const budget = supportsReasoning(initialConfig.model) ? CONTEXT_BUDGET : CHAT_CONTEXT_BUDGET;
   const context = new ContextManager(budget);
+  // Detect system language once at startup — reused on every agent turn.
+  const systemLanguage = detectSystemLanguage();
+
+  // Sync search engine config to env so tools can read it without DI
+  if (initialConfig.searchEngine) process.env['CODEGRUNT_SEARCH_ENGINE'] = initialConfig.searchEngine;
+  if (initialConfig.searxngUrl)   process.env['CODEGRUNT_SEARXNG_URL'] = initialConfig.searxngUrl;
+
+  // Connect MCP servers from ~/.codegrunt/mcp.json, register their tools
+  const mcpManager = getMcpManager();
+  const mcpTools = await mcpManager.connectAll().catch(() => []);
+  if (mcpTools.length > 0) {
+    const registry = getToolRegistry();
+    for (const tool of mcpTools) registry.register(tool, 'mcp');
+    process.stdout.write(chalk.gray(`  [mcp: ${mcpTools.length} tool${mcpTools.length > 1 ? 's' : ''} loaded]\n`));
+  }
 
   let config = initialConfig;
   let provider: LLMProvider = initialProvider;
   let skills = await loadSkills(cwd);
+
+  // ── Session persistence state ─────────────────────────────────────────────
+  let currentSessionId: string | undefined = resumeSessionId;
+
+  // Resume a previous session if requested
+  if (resumeSessionId) {
+    const session = await loadSession(resumeSessionId);
+    if (session) {
+      context.setMessages(session.messages);
+      process.stdout.write(chalk.gray(`  [session: resumed "${session.title.slice(0, 60)}" — ${session.messageCount} messages]\n`));
+    } else {
+      process.stdout.write(chalk.yellow(`  [session: id "${resumeSessionId}" not found, starting fresh]\n`));
+      currentSessionId = undefined;
+    }
+  }
 
   const sessionSummary = await loadSessionSummary(cwd);
   if (sessionSummary) {
@@ -94,11 +134,50 @@ export async function startRepl(initialConfig: CodeGruntConfig, initialProvider:
 
     // Slash commands — only if "/" is immediately followed by a letter (no space)
     if (raw.startsWith('/') && raw.length > 1 && raw[1] !== ' ') {
-      const cmd = await handleSlashCommand(raw, cwd, config, provider, context, skills);
+      // Handle /resume inline — needs direct context access
+      const trimmed = raw.slice(1).trim();
+      if (trimmed === 'resume' || trimmed.startsWith('resume ')) {
+        const parts = trimmed.split(/\s+/);
+        const targetId = parts[1];
+        if (targetId) {
+          const session = await loadSession(targetId);
+          if (session) {
+            context.setMessages(session.messages);
+            currentSessionId = session.id;
+            process.stdout.write(chalk.gray(`  [session: resumed "${session.title.slice(0, 60)}" — ${session.messageCount} messages]\n\n`));
+          } else {
+            process.stdout.write(chalk.yellow(`  Session "${targetId}" not found.\n\n`));
+          }
+        } else {
+          // Interactive picker
+          const sessions = await listSessions(cwd);
+          if (sessions.length === 0) {
+            process.stdout.write(chalk.gray('  No saved sessions for this directory.\n\n'));
+          } else {
+            const choices = sessions.map(s => ({ label: formatSessionEntry(s), value: s.id }));
+            const picked = await selectFromList('Resume session:', choices);
+            if (picked) {
+              const session = await loadSession(picked);
+              if (session) {
+                context.setMessages(session.messages);
+                currentSessionId = session.id;
+                process.stdout.write(chalk.gray(`  [session: resumed "${session.title.slice(0, 60)}" — ${session.messageCount} messages]\n\n`));
+              }
+            }
+          }
+        }
+        continue;
+      }
+
+      const cmd = await handleSlashCommand(raw, cwd, config, provider, context, skills, currentSessionId);
 
       if (cmd.type === 'model_changed' || cmd.type === 'config_changed') {
         config = cmd.config;
         provider = new DeepSeekProvider(config);
+
+        // Sync search engine config to env so tools can read it without DI
+        if (config.searchEngine) process.env['CODEGRUNT_SEARCH_ENGINE'] = config.searchEngine;
+        if (config.searxngUrl)   process.env['CODEGRUNT_SEARXNG_URL'] = config.searxngUrl;
 
         // Adjust context budget when switching between chat/reasoner
         const newBudget = supportsReasoning(config.model) ? CONTEXT_BUDGET : CHAT_CONTEXT_BUDGET;
@@ -124,11 +203,26 @@ export async function startRepl(initialConfig: CodeGruntConfig, initialProvider:
       process.stdout.write(chalk.gray(`  Injecting: ${labels}\n`));
     }
 
+    // ── UserPromptSubmit hook ─────────────────────────────────────────
+    const hookResult = await getHookRegistry().run({
+      event: 'user-prompt-submit',
+      prompt: task,
+      cwd,
+    });
+    if (hookResult.action === 'block') {
+      process.stdout.write(chalk.yellow(`  [hook blocked prompt: ${hookResult.reason}]\n\n`));
+      continue;
+    }
+    const effectiveTask = hookResult.action === 'modify' && typeof hookResult.data['prompt'] === 'string'
+      ? hookResult.data['prompt']
+      : task;
+
     const interrupt = createInterruptController();
     try {
       process.stdout.write('\n');
       await runAgentLoop({
-        task, cwd, config, provider, context, skills,
+        task: effectiveTask, cwd, config, provider, context, skills,
+        language: systemLanguage,
         signal: interrupt.signal,
         memorySummary: sessionSummary ?? undefined,
         userPreferences,
@@ -138,6 +232,15 @@ export async function startRepl(initialConfig: CodeGruntConfig, initialProvider:
           if (updates.length > 0) persistHabitUpdates(updates).catch(() => {});
         },
       });
+      // Auto-save conversation after each successful turn
+      const msgs = context.getMessages();
+      if (msgs.filter(m => m.role !== 'system').length > 0) {
+        currentSessionId = await saveSession(msgs, {
+          id: currentSessionId,
+          cwd,
+          model: config.model,
+        });
+      }
     } catch (err) {
       if ((err as Error)?.name === 'AbortError' || interrupt.signal.aborted) {
         process.stdout.write(chalk.yellow('\nInterrupted.\n'));
