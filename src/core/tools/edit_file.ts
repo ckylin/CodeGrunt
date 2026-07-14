@@ -1,4 +1,5 @@
 import { readFile, writeFile } from 'fs/promises';
+import { existsSync } from 'fs';
 import { resolve } from 'path';
 import type { Tool, ToolResult } from '../../types.js';
 
@@ -33,8 +34,21 @@ export const editFileTool: Tool = {
     const filePath = resolve(args.path as string);
     const oldString = args.old_string as string;
     const newString = args.new_string as string;
-    // Use pre-read content from executor if available (avoids double read)
-    const original = (args._originalContent as string | undefined) ?? await readFile(filePath, 'utf-8');
+    // The confirmation dialog reads the file, then waits (unbounded) for user
+    // input before this executes. Re-read here rather than trusting the
+    // pre-read snapshot in args._originalContent — if the file changed on disk
+    // during that wait (external editor, another process), we must detect it
+    // instead of silently overwriting the newer content.
+    const preRead = args._originalContent as string | undefined;
+    const current = existsSync(filePath) ? await readFile(filePath, 'utf-8') : '';
+    if (preRead !== undefined && preRead !== current) {
+      return {
+        success: false,
+        output: '',
+        error: `File ${filePath} was modified on disk after the edit was confirmed. Re-read the file and retry the edit to avoid overwriting the newer content.`,
+      };
+    }
+    const original = current;
 
     if (!original.includes(oldString)) {
       return {

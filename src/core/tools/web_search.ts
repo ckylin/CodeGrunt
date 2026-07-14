@@ -84,6 +84,21 @@ function parseMojeekHtml(html: string, max: number): SearchResult[] {
 }
 
 async function searchSearXNG(query: string, numResults: number, baseUrl: string): Promise<SearchResult[]> {
+  // searxngUrl comes from config/env, not from the LLM directly, but it's
+  // still user-supplied and unvalidated at the point it's set (config.ts,
+  // /search-engine). Validate here — the actual network boundary — so a
+  // malformed value fails clearly instead of producing a confusing fetch
+  // error, and non-http(s) schemes (file:, gopher:, etc.) can't be used.
+  let parsed: URL;
+  try {
+    parsed = new URL(baseUrl);
+  } catch {
+    throw new Error(`Invalid searxngUrl: "${baseUrl}"`);
+  }
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+    throw new Error(`searxngUrl must use http or https, got: ${parsed.protocol}`);
+  }
+
   const url = `${baseUrl.replace(/\/$/, '')}/search?q=${encodeURIComponent(query)}&format=json&num_results=${numResults}`;
   const res = await fetchWithTimeout(url, {
     headers: { 'Accept': 'application/json' },

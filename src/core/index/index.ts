@@ -15,16 +15,16 @@
 // code_search tool uses this index for fast symbol lookup, falling back to
 // grep if no index exists.
 
-import { readFile, writeFile, mkdir } from 'fs/promises';
+import { readFile, writeFile, mkdir, readdir } from 'fs/promises';
 import { existsSync } from 'fs';
 import { join } from 'path';
 import { homedir } from 'os';
 import { createHash } from 'crypto';
-import { exec } from 'child_process';
+import { execFile } from 'child_process';
 import { promisify } from 'util';
 import { getLogger } from '../observability/logger.js';
 
-const execAsync = promisify(exec);
+const execFileAsync = promisify(execFile);
 const log = getLogger('index');
 
 const INDEX_DIR = join(homedir(), '.codegrunt', 'index');
@@ -144,31 +144,69 @@ const PATTERNS: Array<{ lang: string[]; exts: string[]; pattern: string; kind: C
   },
 ];
 
+const INDEXABLE_EXTS = new Set(['.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs', '.py', '.go', '.rs']);
+const SKIP_DIRS = new Set(['node_modules', '.git', 'dist', 'build', '.codegrunt']);
+
+/** Recursively walk cwd collecting indexable source files, skipping common noise dirs. */
+async function walkFiles(cwd: string, dir = '.', out: string[] = []): Promise<string[]> {
+  const absDir = join(cwd, dir);
+  let entries;
+  try {
+    entries = await readdir(absDir, { withFileTypes: true });
+  } catch {
+    return out;
+  }
+  for (const entry of entries) {
+    if (entry.isDirectory()) {
+      if (SKIP_DIRS.has(entry.name)) continue;
+      await walkFiles(cwd, join(dir, entry.name), out);
+    } else if (entry.isFile()) {
+      const ext = entry.name.slice(entry.name.lastIndexOf('.'));
+      if (INDEXABLE_EXTS.has(ext)) out.push(join(dir, entry.name).replace(/\\/g, '/'));
+    }
+  }
+  return out;
+}
+
+/**
+ * List indexable files, preferring `git ls-files` (respects .gitignore) with
+ * a plain directory walk as fallback when the cwd isn't a git repo.
+ *
+ * Uses execFile with an argument array (not a shell string) so filenames
+ * containing quotes/backticks/`$()` can never be interpreted as shell syntax.
+ */
+async function listFiles(cwd: string): Promise<string[]> {
+  try {
+    const { stdout } = await execFileAsync(
+      'git', ['ls-files', '--cached', '--others', '--exclude-standard'],
+      { cwd, timeout: 15000 },
+    );
+    const files = stdout.trim().split('\n').filter(Boolean);
+    if (files.length > 0) {
+      return files.filter(f => INDEXABLE_EXTS.has(f.slice(f.lastIndexOf('.'))));
+    }
+  } catch {
+    // not a git repo or git unavailable — fall through to manual walk
+  }
+  return walkFiles(cwd);
+}
+
 async function extractSymbols(cwd: string): Promise<RawSymbol[]> {
   const symbols: RawSymbol[] = [];
 
-  // Build file list via ripgrep or find
-  let fileList: string[] = [];
-  try {
-    const { stdout } = await execAsync(
-      'git ls-files --cached --others --exclude-standard 2>/dev/null || find . -type f \\( -name "*.ts" -o -name "*.tsx" -o -name "*.js" -o -name "*.py" -o -name "*.go" -o -name "*.rs" \\) -not -path "*/node_modules/*" -not -path "*/.git/*"',
-      { cwd, timeout: 15000 },
-    );
-    fileList = stdout.trim().split('\n').filter(Boolean).map(f => f.replace(/^\.\//, ''));
-  } catch {
-    return [];
-  }
+  const fileList = await listFiles(cwd);
+  if (fileList.length === 0) return [];
 
-  // For each pattern, run grep
+  // For each pattern, run grep directly against the matching files — passed
+  // as separate argv entries (execFile, no shell) so a filename can never
+  // break out of quoting and inject shell syntax.
   for (const { exts, pattern, kind } of PATTERNS) {
-    const matchingFiles = fileList.filter(f => exts.some(ext => f.endsWith(ext)));
+    const matchingFiles = fileList.filter(f => exts.some(ext => f.endsWith(ext))).slice(0, 500);
     if (matchingFiles.length === 0) continue;
 
     try {
-      // Use grep with line numbers
-      const fileArgs = matchingFiles.slice(0, 500).map(f => `"${f}"`).join(' ');
-      const { stdout } = await execAsync(
-        `grep -En "${pattern}" ${fileArgs} 2>/dev/null || true`,
+      const { stdout } = await execFileAsync(
+        'grep', ['-En', pattern, ...matchingFiles],
         { cwd, timeout: 10000, maxBuffer: 2 * 1024 * 1024 },
       );
 
@@ -190,7 +228,7 @@ async function extractSymbols(cwd: string): Promise<RawSymbol[]> {
         });
       }
     } catch {
-      // grep failure for this pattern — skip
+      // grep exits non-zero when there are no matches — that's expected, not an error
     }
   }
 
@@ -248,11 +286,13 @@ export interface SearchHit {
   score: number;
 }
 
-export function searchIndex(index: CodeIndex, query: string, maxResults = 10): SearchHit[] {
+export function searchIndex(index: CodeIndex, query: string, maxResults = 10, kind?: CodeSymbol['kind']): SearchHit[] {
   const q = query.toLowerCase();
   const words = q.split(/\s+/).filter(Boolean);
 
-  const scored = index.symbols.map(symbol => {
+  const candidates = kind ? index.symbols.filter(s => s.kind === kind) : index.symbols;
+
+  const scored = candidates.map(symbol => {
     const nameLower = symbol.name.toLowerCase();
     const fileLower = symbol.file.toLowerCase();
 

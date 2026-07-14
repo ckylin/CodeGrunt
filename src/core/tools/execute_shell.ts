@@ -67,30 +67,38 @@ export const executeShellTool: Tool = {
       child.stdout.on('data', onData);
       child.stderr.on('data', onData);
 
+      // SIGKILL fallback timer — tracked separately so it can be cleared if the
+      // child exits on its own after SIGTERM but before the 2s fallback fires.
+      // Without clearing it, the Node event loop hangs an extra 2s after every
+      // timed-out command, even ones that terminate cleanly.
+      let killTimer: NodeJS.Timeout | undefined;
+
       const timer = setTimeout(() => {
         timedOut = true;
         child.kill('SIGTERM');
-        // SIGKILL fallback if SIGTERM doesn't work within 2s
-        setTimeout(() => { try { child.kill('SIGKILL'); } catch { /* already dead */ } }, 2000);
+        killTimer = setTimeout(() => { try { child.kill('SIGKILL'); } catch { /* already dead */ } }, 2000);
       }, timeoutMs);
 
       child.on('close', (code) => {
         clearTimeout(timer);
+        if (killTimer) clearTimeout(killTimer);
         let output = Buffer.concat(chunks).toString('utf-8');
         if (truncated) output += `\n[Output truncated at ${MAX_OUTPUT_BYTES} bytes]`;
         if (clamped) output += `\n[timeout clamped to 5min]`;
+        const confirmDurationMs = (args._confirmDurationMs as number | undefined) ?? 0;
         if (timedOut) {
-          resolve({ success: false, output, error: `Command timed out after ${timeoutMs}ms (captured ${totalBytes} bytes)` });
+          resolve({ success: false, output, error: `Command timed out after ${timeoutMs}ms (captured ${totalBytes} bytes)`, confirmDurationMs });
         } else if (code !== 0) {
-          resolve({ success: false, output, error: `Command exited with code ${code}` });
+          resolve({ success: false, output, error: `Command exited with code ${code}`, confirmDurationMs });
         } else {
-          resolve({ success: true, output: output || '(no output)' });
+          resolve({ success: true, output: output || '(no output)', confirmDurationMs });
         }
       });
 
       child.on('error', (err) => {
         clearTimeout(timer);
-        resolve({ success: false, output: '', error: err.message });
+        if (killTimer) clearTimeout(killTimer);
+        resolve({ success: false, output: '', error: err.message, confirmDurationMs: (args._confirmDurationMs as number | undefined) ?? 0 });
       });
     });
   },

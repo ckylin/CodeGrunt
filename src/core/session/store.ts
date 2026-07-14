@@ -53,7 +53,20 @@ async function ensureDir(): Promise<void> {
   await mkdir(SESSIONS_DIR, { recursive: true });
 }
 
+// Session ids are always randomUUID() output. Rejecting anything else here
+// (rather than trusting the caller) closes off path traversal via
+// --resume <id> / "/resume <id>" — a hand-crafted id like "../../etc/passwd"
+// would otherwise resolve outside SESSIONS_DIR.
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+function isValidSessionId(id: string): boolean {
+  return UUID_RE.test(id);
+}
+
 function sessionPath(id: string): string {
+  if (!isValidSessionId(id)) {
+    throw new Error(`Invalid session id: ${id}`);
+  }
   return join(SESSIONS_DIR, `${id}.json`);
 }
 
@@ -138,8 +151,9 @@ export async function saveSession(
   return id;
 }
 
-/** Load a full session by ID. Returns null if not found. */
+/** Load a full session by ID. Returns null if not found or the id is invalid. */
 export async function loadSession(id: string): Promise<SessionRecord | null> {
+  if (!isValidSessionId(id)) return null;
   try {
     const raw = await readFile(sessionPath(id), 'utf-8');
     return JSON.parse(raw) as SessionRecord;
@@ -164,6 +178,7 @@ export async function listAllSessions(): Promise<SessionIndexEntry[]> {
 
 /** Delete a session by ID. */
 export async function deleteSession(id: string): Promise<boolean> {
+  if (!isValidSessionId(id)) return false;
   const p = sessionPath(id);
   if (!existsSync(p)) return false;
   await unlink(p).catch(() => {});

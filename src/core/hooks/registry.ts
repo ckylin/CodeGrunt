@@ -219,6 +219,12 @@ function runScript(scriptPath: string, stdinData: string): Promise<HookResponse>
     }, HOOK_TIMEOUT_MS);
 
     child.stdout.on('data', (chunk: Buffer) => { stdout += chunk.toString(); });
+    // If spawn() fails asynchronously (bad interpreter path, EACCES), writing
+    // to stdin can emit an 'error' event on the stream. Without a listener,
+    // Node treats that as an uncaught exception — defeating the "hooks must
+    // never crash the agent" guarantee this module documents. The child's
+    // own 'error' handler below still fires and resolves the promise.
+    child.stdin.on('error', () => { /* handled via child.on('error') below */ });
     child.stdin.write(stdinData);
     child.stdin.end();
 

@@ -14,14 +14,21 @@ export type ConfirmChoice = 'yes' | 'yes_all_session' | 'no';
 
 // ── Confirm prompt ──────────────────────────────────────────────────────────
 
-async function promptConfirm(): Promise<ConfirmChoice> {
-  const items = [
-    { value: 'yes', label: 'Yes — 接受这次修改' },
-    { value: 'yes_all_session', label: 'Yes for all — 本次会话中所有类似修改都自动接受' },
-    { value: 'no', label: 'No — 拒绝这次修改' },
-  ];
+async function promptConfirm(kind: 'edit' | 'command' = 'edit'): Promise<ConfirmChoice> {
+  const items = kind === 'command'
+    ? [
+        { value: 'yes', label: 'Yes — 执行这条命令' },
+        { value: 'yes_all_session', label: 'Yes for all — 本次会话中所有类似操作都自动执行' },
+        { value: 'no', label: 'No — 拒绝执行' },
+      ]
+    : [
+        { value: 'yes', label: 'Yes — 接受这次修改' },
+        { value: 'yes_all_session', label: 'Yes for all — 本次会话中所有类似修改都自动接受' },
+        { value: 'no', label: 'No — 拒绝这次修改' },
+      ];
 
-  const selected = await selectFromList('Confirm edit', items);
+  const label = kind === 'command' ? 'Confirm command' : 'Confirm edit';
+  const selected = await selectFromList(label, items);
   if (selected === null) return 'no';
   return selected as ConfirmChoice;
 }
@@ -62,8 +69,19 @@ export async function confirmEdit(
 
   process.stdout.write('\n');
 
-  const choice = await promptConfirm();
+  const choice = await promptConfirm('edit');
   return { choice, originalContent: oldContent };
+}
+
+/**
+ * Show a shell command and prompt for confirmation before executing it.
+ * Mirrors confirmEdit's yes/yes_all_session/no flow so execute_shell gets
+ * the same trust-mode gating as write_file/edit_file.
+ */
+export async function confirmShellCommand(command: string, cwd: string): Promise<ConfirmChoice> {
+  process.stdout.write('\n  ' + chalk.yellow('run') + '  ' + chalk.bold(command) + '\n');
+  process.stdout.write(chalk.gray(`  cwd: ${cwd}`) + '\n\n');
+  return promptConfirm('command');
 }
 
 /**

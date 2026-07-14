@@ -8,7 +8,6 @@
 import type { Stage, StageResult, PipelineContext } from '../types.js';
 import type { ToolCallMessage } from '../../../types.js';
 import { READ_TOOL_NAMES, WRITE_TOOL_NAMES } from '../types.js';
-import { getToolByName } from '../../tools/registry.js';
 import { executeToolCall, repairToolArgs } from './process-tools-helpers.js';
 import { getLogger } from '../../observability/logger.js';
 import { getDefaultEventBus, type ToolCallEvent, type ToolResultEvent } from '../../events/bus.js';

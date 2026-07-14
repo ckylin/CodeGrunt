@@ -201,6 +201,9 @@ async function runGenerator(
   stepDescription?: string,
   sessionHasRead = false,
   prepareStage?: PrepareContextStage,
+  /** When true, skip pushing the user message — used for inner tool-call
+   *  iterations where the prompt already has the most recent instruction. */
+  skipUserMessage = false,
 ): Promise<GeneratorResult> {
   const { task, cwd, config, provider, onText, signal } = options;
   const toolDefs = getToolDefinitions();
@@ -257,10 +260,10 @@ async function runGenerator(
     userPreferences: options.userPreferences,
   };
 
-  // Push the user message for this turn. PrepareContextStage handles iteration=0
-  // (with cwd prefix + reasoner system embed); for subsequent iterations we push
-  // directly so every turn — refine, inner-loop, multi-step — has its instruction.
-  if (iteration > 0) {
+  // Always push the user message for this turn.
+  // For inner tool-call iterations (skipUserMessage=true), the instruction is
+  // already in context from the outer call — pushing it again wastes tokens.
+  if (!skipUserMessage) {
     pushUserMessage(pipeCtx, effectiveTask);
   }
 
@@ -542,6 +545,15 @@ async function runCodingFlow(
   // Global iteration counter — ensures iteration=0 only on the very first call.
   let globalIter = 0;
 
+  // pruneRefineMessages is only called on the "evaluation passed" and "max
+  // retries exhausted, user continued" paths below. If a step exits via
+  // userRejected=true or a thrown generator error mid-retry, those calls are
+  // skipped and any "[评估反馈]"/"[Evaluation Feedback]" messages already
+  // pushed to context stay there permanently, polluting every future turn.
+  // The try/finally guarantees cleanup on every exit path — the function is
+  // idempotent (filters by prefix) so calling it again on the normal paths
+  // is harmless.
+  try {
   for (let stepIdx = 0; stepIdx < plan.steps.length; stepIdx++) {
     if (signal?.aborted) break;
 
@@ -567,33 +579,35 @@ async function runCodingFlow(
       if (genResult.error) { log.error('Generator error', { error: genResult.error.message }); throw genResult.error; }
       displayToolCalls(genResult.pipeCtx, onToolCall, onToolResult);
 
-      // Accumulate ALL tool calls/results across inner iterations so the
-      // evaluator sees the full picture (e.g. read in iter 1, write in iter 2).
+      // Track tool message count BEFORE runGenerator so we only evaluate FRESH results.
+      // Old tool results from previous retry attempts (stored in context) must NOT leak
+      // into the evaluator, otherwise a single error causes infinite retries.
+      // Using context.getMessages() ensures accuracy regardless of genResult state.
+      const toolMsgCountBefore = context.getMessages().filter(
+        m => m.role === 'tool' && 'tool_call_id' in m
+      ).length;
+
+      // Accumulate tool calls for this turn
       const allToolCalls: Array<{ name: string; args: string; id: string }> = [
         ...genResult.pipeCtx.toolCalls.map(tc => ({ name: tc.function.name, args: tc.function.arguments, id: tc.id })),
       ];
-      const allToolMessages: Array<{ content: string; tool_call_id: string }> = genResult.pipeCtx.messages
-        .filter(m => m.role === 'tool' && 'tool_call_id' in m)
-        .map(m => ({ content: String(m.content), tool_call_id: (m as import('../../types.js').ToolResultMessage).tool_call_id }));
 
       {
         let innerIter = 1;
         while (!genResult.done && genResult.pipeCtx.toolCalls.length > 0 && innerIter < MAX_ITERATIONS) {
           if (signal?.aborted) break;
+
           const next = await runGenerator(
-            context, options, lang, globalIter++, stepDesc, sessionHasRead, prepareStage,
+            context, options, lang, globalIter++, stepDesc, sessionHasRead, prepareStage, true,
           );
           if (next.hasReadThisTurn) sessionHasRead = true;
           if (next.userRejected) { userRejected = true; break; }
           if (next.error) throw next.error;
           displayToolCalls(next.pipeCtx, onToolCall, onToolResult);
 
-          // Accumulate new tool calls/results from this inner iteration
+          // Only accumulate NEW tool calls from this inner iteration
           for (const tc of next.pipeCtx.toolCalls) {
             allToolCalls.push({ name: tc.function.name, args: tc.function.arguments, id: tc.id });
-          }
-          for (const m of next.pipeCtx.messages.filter(m => m.role === 'tool' && 'tool_call_id' in m)) {
-            allToolMessages.push({ content: String(m.content), tool_call_id: (m as import('../../types.js').ToolResultMessage).tool_call_id });
           }
 
           genResult = next;
@@ -602,10 +616,16 @@ async function runCodingFlow(
         if (userRejected) break;
       }
 
-      // Build evaluator inputs from the cumulative tool calls/results
+      // Build evaluator inputs from the cumulative tool calls — but ONLY fresh tool results.
+      // Slice by position WITHIN the tool-message-only list, not by index in the
+      // full (mixed-role) messages array — those two counters have different units.
       const currentTurnToolCalls = allToolCalls.map(tc => ({ name: tc.name, args: tc.args }));
       const toolCallById = new Map(allToolCalls.map(tc => [tc.id, tc.name]));
-      const currentTurnToolResults = allToolMessages.map(m => ({
+      const freshToolMessages = genResult.pipeCtx.messages
+        .filter(m => m.role === 'tool' && 'tool_call_id' in m)
+        .slice(toolMsgCountBefore)
+        .map(m => ({ content: String(m.content), tool_call_id: (m as import('../../types.js').ToolResultMessage).tool_call_id }));
+      const currentTurnToolResults = freshToolMessages.map(m => ({
         content: m.content,
         toolName: toolCallById.get(m.tool_call_id),
       }));
@@ -668,6 +688,10 @@ async function runCodingFlow(
 
     if (userRejected) break;
     if (!stepPassed) log.error('Step failed after all retries', { stepId: step.id });
+  }
+  } finally {
+    // Idempotent — no-op if the normal-path calls already pruned these messages.
+    pruneRefineMessages(context);
   }
 
   if (userRejected) { log.info('Agent ended — user rejected'); return { responseLength: 0 }; }

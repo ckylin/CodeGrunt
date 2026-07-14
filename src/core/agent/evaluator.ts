@@ -57,8 +57,23 @@ function classifyShellFailure(content: string): ShellDiagnosis {
     : content;
 
   // Test failures (jest / vitest / mocha / pytest)
-  if (/\b(FAIL|FAILED|AssertionError|expect\(|● )/m.test(outputBody)) {
-    const failLine = outputBody.split('\n').find(l => /FAIL|●/.test(l)) ?? '';
+  // Uses multiple signals: test-runner progress indicators (×|✗|●), numeric
+  // pass/fail counts near FAIL/ERROR keywords, file:line assertion references,
+  // and "Test Files" summary lines. This avoids false positives on source
+  // code that happens to contain test-related keywords.
+  const hasTestIndicator = /[×✗●]/.test(outputBody);
+  const hasTestSummary = /Test Files.*\d+ (?:passed|failed)/im.test(outputBody);
+  const hasTestFailureWithCount = /\d+ (?:passed|failed|failing).*?(?:FAIL|FAILED|ERROR)/im.test(outputBody) ||
+    /(?:FAIL|FAILED|ERROR).*?\d+ (?:passed|failed|failing)/im.test(outputBody);
+  const hasAssertionRef = /at\s+\S+\.(?:test|spec)\.\S+:\d+/im.test(outputBody) ||
+    /AssertionError/.test(outputBody);
+  if (hasTestIndicator || hasTestSummary || hasTestFailureWithCount || hasAssertionRef) {
+    const failLine = outputBody.split('\n').find(l => {
+      const trimmed = l.trim();
+      // Skip comment lines (JavaScript/TypeScript/Python/Ruby) and shell comments
+      if (trimmed.startsWith('//') || trimmed.startsWith('#') || trimmed.startsWith('/*')) return false;
+      return /\bFAIL\b|●|\d+ (?:passed|failed|failing)/.test(trimmed);
+    }) ?? '';
     return {
       issue: `测试失败: ${failLine.trim().slice(0, 120)}`,
       suggestion: '读取失败的测试文件，分析断言错误原因，修复实现代码后重新运行测试',

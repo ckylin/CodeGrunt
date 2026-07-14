@@ -3,10 +3,12 @@
 // Falls back to grep-based search if no index exists.
 
 import type { Tool, ToolResult } from '../../types.js';
-import { loadIndex, searchIndex } from '../index/index.js';
+import { loadIndex, searchIndex, type CodeSymbol } from '../index/index.js';
 import { getLogger } from '../observability/logger.js';
 
 const log = getLogger('tools:code_search');
+
+const VALID_KINDS: ReadonlySet<string> = new Set(['function', 'class', 'interface', 'type', 'export', 'const', 'variable']);
 
 export const codeSearchTool: Tool = {
   definition: {
@@ -51,12 +53,8 @@ export const codeSearchTool: Tool = {
       };
     }
 
-    let hits = searchIndex(index, query, maxResults);
-
-    // Filter by kind if specified
-    if (kind) {
-      hits = hits.filter(h => h.symbol.kind === kind);
-    }
+    const validKind = kind && VALID_KINDS.has(kind) ? (kind as CodeSymbol['kind']) : undefined;
+    const hits = searchIndex(index, query, maxResults, validKind);
 
     if (hits.length === 0) {
       return {

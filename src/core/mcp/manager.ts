@@ -114,25 +114,35 @@ export class McpClientManager {
 
     const client = new Client(CLIENT_INFO);
 
-    await Promise.race([
-      client.connect(transport),
-      new Promise<never>((_, reject) =>
-        setTimeout(() => reject(new Error(`Connection timed out after ${CONNECT_TIMEOUT_MS}ms`)), CONNECT_TIMEOUT_MS)
-      ),
-    ]);
+    // If connect() times out or listTools() throws, the transport (stdio child
+    // process / SSE connection) must still be torn down here — otherwise a
+    // flaky server leaks a process/connection on every failed retry, since
+    // `this.clients` (and the disconnect() path that closes it) is only
+    // populated on success.
+    try {
+      await Promise.race([
+        client.connect(transport),
+        new Promise<never>((_, reject) =>
+          setTimeout(() => reject(new Error(`Connection timed out after ${CONNECT_TIMEOUT_MS}ms`)), CONNECT_TIMEOUT_MS)
+        ),
+      ]);
 
-    this.clients.set(config.name, client);
+      const toolsResult = await client.listTools();
+      const toolDefs = toolsResult.tools ?? [];
+      const tools = toolDefs.map(t => makeMcpTool(client, t, config.name));
+      const toolNames = tools.map(t => t.definition.function.name);
 
-    const toolsResult = await client.listTools();
-    const toolDefs = toolsResult.tools ?? [];
-    const tools = toolDefs.map(t => makeMcpTool(client, t, config.name));
-    const toolNames = tools.map(t => t.definition.function.name);
+      this.clients.set(config.name, client);
+      this.states.set(config.name, { config, status: 'connected', toolNames });
+      this.registeredToolNames.set(config.name, toolNames);
 
-    this.states.set(config.name, { config, status: 'connected', toolNames });
-    this.registeredToolNames.set(config.name, toolNames);
-
-    log.info('MCP server connected', { name: config.name, tools: toolNames.length });
-    return tools;
+      log.info('MCP server connected', { name: config.name, tools: toolNames.length });
+      return tools;
+    } catch (err) {
+      await Promise.allSettled([client.close(), transport.close()]);
+      this.states.set(config.name, { config, status: 'error', toolNames: [] });
+      throw err;
+    }
   }
 
   /** Disconnect a server and deregister its tools */
@@ -142,11 +152,13 @@ export class McpClientManager {
       client.close().catch(() => {});
       this.clients.delete(name);
     }
-    this.states.set(name, {
-      config: this.states.get(name)?.config ?? { name, transport: 'stdio' },
-      status: 'disconnected',
-      toolNames: [],
-    });
+    // Only update state if we've seen this server before — fabricating a
+    // config (e.g. guessing transport: 'stdio') for an unknown name would
+    // silently misrepresent the real transport (sse, etc.) to listStates().
+    const existing = this.states.get(name);
+    if (existing) {
+      this.states.set(name, { config: existing.config, status: 'disconnected', toolNames: [] });
+    }
     this.registeredToolNames.delete(name);
     log.info('MCP server disconnected', { name });
   }

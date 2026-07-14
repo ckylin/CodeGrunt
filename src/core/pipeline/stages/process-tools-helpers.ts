@@ -12,7 +12,7 @@ import { existsSync } from 'fs';
 import { resolve } from 'path';
 import type { ToolResult } from '../../../types.js';
 import { getToolByName } from '../../tools/registry.js';
-import { confirmEdit, applyEdit } from '../../../utils/confirm.js';
+import { confirmEdit, confirmShellCommand, applyEdit } from '../../../utils/confirm.js';
 
 // ── Tool-call JSON repair ─────────────────────────────────────────────────
 //
@@ -107,6 +107,17 @@ async function confirmOrSkip(
   return { accepted: choice === 'yes' || choice === 'yes_all_session', originalContent };
 }
 
+/** Same confirm-or-skip flow as confirmOrSkip, but for shell commands (no file/diff). */
+async function confirmShellOrSkip(command: string, effectiveCwd: string): Promise<boolean> {
+  if (yesAllSessionActive) return true;
+
+  const choice = await confirmShellCommand(command, effectiveCwd);
+  if (choice === 'yes_all_session') {
+    yesAllSessionActive = true;
+  }
+  return choice === 'yes' || choice === 'yes_all_session';
+}
+
 // ── Main execution ─────────────────────────────────────────────────────────
 
 export async function executeToolCall(
@@ -194,6 +205,22 @@ export async function executeToolCall(
   // Inject cwd into execute_shell if not provided
   if (name === 'execute_shell' && cwd && !args.cwd) {
     args.cwd = cwd;
+  }
+
+  // execute_shell is destructive (arbitrary command execution) and must go
+  // through the same confirm-or-skip gate as write_file/edit_file — it was
+  // previously only blocked in plan mode, letting it run unconfirmed in the
+  // default "code" trust mode.
+  if (name === 'execute_shell') {
+    const command = args.command as string;
+    const effectiveCwd = (args.cwd as string | undefined) ?? cwd ?? process.cwd();
+    const confirmStart = Date.now();
+    const accepted = await confirmShellOrSkip(command, effectiveCwd);
+    const confirmDurationMs = Date.now() - confirmStart;
+    if (!accepted) {
+      return { success: false, output: '', error: 'Command rejected by user.', userRejected: true, confirmDurationMs };
+    }
+    args._confirmDurationMs = confirmDurationMs;
   }
 
   try {

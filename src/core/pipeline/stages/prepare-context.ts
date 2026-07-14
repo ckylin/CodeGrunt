@@ -11,6 +11,7 @@ import { isReasonerModel } from '../../../config.js';
 import { getLogger } from '../../observability/logger.js';
 import { detectSystemLanguage } from '../../../utils/locale.js';
 import { createHash } from 'crypto';
+import { platform } from 'os';
 
 const log = getLogger('stage:prepare-context');
 
@@ -38,8 +39,12 @@ ${langInstruction}`;
 - **After completing the task:** one or two sentences max — what changed and any follow-up the user should know about.
 - **When uncertain:** use a tool to find out. Prefer read_file / search_files over guessing.`;
 
+  const osName = platform() === 'win32' ? 'Windows' : platform() === 'darwin' ? 'macOS' : 'Linux';
+
   // Strict tool-use workflow
   const toolWorkflow = `## Tool usage workflow
+
+**Platform:** You are running on ${osName}. All shell commands you generate must use the correct syntax for this OS (e.g., Windows CMD/PowerShell conventions on Windows, POSIX on Linux/macOS).
 
 **Always read before writing.**
 Use read_file or search_files on relevant files before any edit_file or write_file call. Writing without reading is how hallucinated APIs and broken imports happen.
