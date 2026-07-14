@@ -1,4 +1,5 @@
 import chalk from 'chalk';
+import stringWidth from 'string-width';
 
 /**
  * Streaming Markdown renderer for terminal output.
@@ -211,10 +212,6 @@ export class MarkdownRenderer {
     return row.trimEnd().slice(1, -1).split('|').map(c => c.trim());
   }
 
-  private stripAnsi(s: string): string {
-    return s.replace(/\x1b\[[0-9;]*m/g, '');
-  }
-
   private renderTable(rows: string[]): string {
     const headerRaw = this.parseTableRow(rows[0]);
     const dataRaw = rows.slice(2).map(r => this.parseTableRow(r));
@@ -225,17 +222,17 @@ export class MarkdownRenderer {
     const colCount = header.length;
     const widths: number[] = [];
     for (let i = 0; i < colCount; i++) {
-      let maxW = this.stripAnsi(header[i]).length;
+      let maxW = stringWidth(header[i]);
       for (const row of data) {
-        const w = this.stripAnsi(row[i] ?? '').length;
+        const w = stringWidth(row[i] ?? '');
         if (w > maxW) maxW = w;
       }
       widths.push(Math.max(maxW, 3));
     }
 
     const pad = (s: string, w: number): string => {
-      const visual = this.stripAnsi(s);
-      return s + ' '.repeat(w - visual.length);
+      const visual = stringWidth(s);
+      return s + ' '.repeat(Math.max(0, w - visual));
     };
 
     const sep = muted(' │ ');
