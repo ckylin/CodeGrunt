@@ -334,7 +334,6 @@ export async function runAgentLoop(options: AgentRunOptions): Promise<void> {
       const compactResult = await compactMessages(context.getMessages(), {
         provider,
         model,
-        isReasoner: isReasonerModel(model),
         language: lang,
         signal,
       });

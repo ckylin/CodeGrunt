@@ -121,6 +121,11 @@ export class DeepSeekProvider implements LLMProvider {
       ...(options.reasoningEffort !== undefined
         ? { reasoning_effort: options.reasoningEffort } as Record<string, unknown>
         : {}),
+      // V4 thinking mode toggle — V4 models think by default; explicitly disable
+      // for calls that want a fast, non-reasoning response (e.g. summarization).
+      ...(options.thinking !== undefined
+        ? { thinking: { type: options.thinking } } as Record<string, unknown>
+        : {}),
       messages: openaiMessages,
       tools: tools && tools.length > 0 ? tools : undefined,
       tool_choice: tools && tools.length > 0 ? 'auto' : undefined,

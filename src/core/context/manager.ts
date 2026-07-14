@@ -2,9 +2,12 @@ import type { Message } from '../../types.js';
 
 const CHARS_PER_TOKEN = 4;
 // Signal compaction when estimated tokens exceed this fraction of the budget.
-const AUTO_COMPACT_THRESHOLD = 0.50;
+// Every compact() call replaces the message array wholesale, which invalidates
+// DeepSeek's prefix cache — so triggering less often (higher threshold) trades
+// a bit of headroom for a much better overall cache hit rate.
+const AUTO_COMPACT_THRESHOLD = 0.70;
 // Also signal when non-system message count exceeds this number.
-const AUTO_COMPACT_MESSAGE_COUNT = 30;
+const AUTO_COMPACT_MESSAGE_COUNT = 40;
 // Emergency hard limit: only splice when tokens exceed budget by this factor.
 // Keeps prefix cache intact in normal operation; prevents OOM in extreme cases.
 const EMERGENCY_TRIM_FACTOR = 2.0;

@@ -13,12 +13,13 @@
 // Ref: src/core/pipeline/stages/prepare-context.ts L103 for reasoner pattern
 
 import chalk from 'chalk';
+import { isReasonerModel } from '../../config.js';
 import type { LLMProvider, Message, StreamChunk } from '../../types.js';
 
 // ── Constants ───────────────────────────────────────────────────────────────
 
 const CHARS_PER_TOKEN = 4;
-const CHUNK_TOKENS = 6_000;        // max tokens per chunk
+const CHUNK_TOKENS = 12_000;       // max tokens per chunk
 const CHUNK_SUMMARY_TOKENS = 400;  // max tokens for each chunk summary
 const FINAL_SUMMARY_TOKENS = 1500; // max tokens for merged final summary
 const KEEP_RECENT = 15;            // keep last N messages uncompressed
@@ -86,6 +87,14 @@ export function estimateTokens(messages: Message[]): number {
   return total;
 }
 
+// ── Light model selection ────────────────────────────────────────────────────
+// Summarization is a structured task that doesn't need the caller's configured
+// model tier — same downgrade policy as Intentor classification and agent_open.
+export function selectCompactModel(configuredModel: string): string {
+  if (configuredModel.startsWith('deepseek-')) return 'deepseek-v4-flash';
+  return configuredModel;
+}
+
 // ── LLM summarization helper ────────────────────────────────────────────────
 
 function buildCompactRequest(
@@ -130,6 +139,10 @@ async function streamSummary(
       maxTokens,
       // Reasoner models don't support temperature — omit it.
       ...(isReasoner ? {} : { temperature: 0.2 }),
+      // Summarization doesn't need chain-of-thought — disable V4 thinking mode
+      // for a faster, cheaper response. R1 reasoner models don't support this
+      // toggle (they always think), so only send it for non-reasoner models.
+      ...(isReasoner ? {} : { thinking: 'disabled' as const }),
       signal,
     });
     for await (const chunk of stream) {
@@ -212,8 +225,8 @@ function singleSummaryInstruction(lang: 'zh' | 'en'): string {
 
 export interface CompactOptions {
   provider: LLMProvider;
+  /** Caller's configured model — downgraded internally via selectCompactModel(). */
   model: string;
-  isReasoner: boolean;
   language: 'zh' | 'en';
   signal?: AbortSignal;
   /** Recent messages to keep uncompressed (default: 6) */
@@ -251,6 +264,13 @@ export async function compactMessages(
   const chunkTokens = opts.chunkTokens ?? CHUNK_TOKENS;
   const lang = opts.language;
 
+  // Downgrade to the light model tier for summarization — this is a structured
+  // task that doesn't need the caller's configured model, and it's cheaper/faster.
+  // The flash model is never a reasoner model, so recompute isReasoner for it
+  // rather than trusting the caller-supplied flag (which describes opts.model).
+  const model = selectCompactModel(opts.model);
+  const isReasoner = isReasonerModel(model);
+
   const { toSummarize, recent } = chunkMessages(nonSystem, {
     keepRecent,
     chunkTokens,
@@ -269,24 +289,26 @@ export async function compactMessages(
   if (toSummarize.length === 1) {
     // Single chunk — one LLM call
     const text = toSummarize[0].map(formatMessageForCompact).join('\n\n');
-    const msgs = buildCompactRequest(text, opts.isReasoner, lang, singleSummaryInstruction(lang));
-    finalSummary = await streamSummary(opts.provider, opts.model, opts.isReasoner, msgs, FINAL_SUMMARY_TOKENS, opts.signal);
+    const msgs = buildCompactRequest(text, isReasoner, lang, singleSummaryInstruction(lang));
+    finalSummary = await streamSummary(opts.provider, model, isReasoner, msgs, FINAL_SUMMARY_TOKENS, opts.signal);
   } else {
-    // Multiple chunks — summarize each, then merge
-    const chunkSummaries: string[] = [];
-    for (let i = 0; i < toSummarize.length; i++) {
-      const text = toSummarize[i].map(formatMessageForCompact).join('\n\n');
-      const msgs = buildCompactRequest(text, opts.isReasoner, lang, chunkSummaryInstruction(lang));
-      const summary = await streamSummary(opts.provider, opts.model, opts.isReasoner, msgs, CHUNK_SUMMARY_TOKENS, opts.signal);
-      chunkSummaries.push(summary);
-    }
+    // Multiple chunks — summarize independently in parallel, then merge.
+    // These calls have no dependency on each other, so running them serially
+    // just adds up wait time for no benefit.
+    const chunkSummaries = await Promise.all(
+      toSummarize.map(chunk => {
+        const text = chunk.map(formatMessageForCompact).join('\n\n');
+        const msgs = buildCompactRequest(text, isReasoner, lang, chunkSummaryInstruction(lang));
+        return streamSummary(opts.provider, model, isReasoner, msgs, CHUNK_SUMMARY_TOKENS, opts.signal);
+      })
+    );
 
     // Merge chunk summaries
     const mergeText = chunkSummaries
       .map((s, i) => `[Part ${i + 1}]\n${s}`)
       .join('\n\n');
-    const mergeMsgs = buildCompactRequest(mergeText, opts.isReasoner, lang, mergeSummaryInstruction(lang));
-    finalSummary = await streamSummary(opts.provider, opts.model, opts.isReasoner, mergeMsgs, FINAL_SUMMARY_TOKENS, opts.signal);
+    const mergeMsgs = buildCompactRequest(mergeText, isReasoner, lang, mergeSummaryInstruction(lang));
+    finalSummary = await streamSummary(opts.provider, model, isReasoner, mergeMsgs, FINAL_SUMMARY_TOKENS, opts.signal);
   }
 
   // Also include the recent messages' content in the summary context

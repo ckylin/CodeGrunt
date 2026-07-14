@@ -82,6 +82,8 @@ export interface RequestOptions {
   frequencyPenalty?: number;
   /** Penalize new tokens based on presence so far (DeepSeek: -2.0 to 2.0) */
   presencePenalty?: number;
+  /** DeepSeek V4 thinking mode toggle — V4 models think by default; set 'disabled' for fast, non-reasoning responses */
+  thinking?: 'enabled' | 'disabled';
   tools?: ToolDefinition[];
   signal?: AbortSignal;
 }
