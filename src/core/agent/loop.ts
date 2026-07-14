@@ -42,6 +42,7 @@ import { isReasonerModel } from '../../config.js';
 import { saveSessionSummary } from '../memory/store.js';
 import { getHookRegistry } from '../hooks/registry.js';
 import { createSnapshot } from '../snapshot/index.js';
+import { setSubagentContext } from './subagent.js';
 
 // ── P/G/E modules ────────────────────────────────────────────────────────
 import { detectIntent, selectModelForTask } from './intentor.js';
@@ -314,6 +315,10 @@ export async function runAgentLoop(options: AgentRunOptions): Promise<void> {
 
   resetYesAll();
   setTrustMode(options.config.trustMode ?? 'code');
+  // agent_open needs a provider/model to spawn sub-agents with — set once per
+  // turn before any tool call can run. Updated again below once the model is
+  // auto-routed, so sub-agents inherit the same tier as the main turn.
+  setSubagentContext(provider, model);
 
   // Auto-compact: if the context flagged itself as near-capacity on the previous
   // turn, summarize before running the next agent turn so history is preserved
@@ -364,6 +369,7 @@ export async function runAgentLoop(options: AgentRunOptions): Promise<void> {
     process.stdout.write(chalk.gray(`  [auto-route: ${model} → ${routedModel}]\n`));
     log.info('Model auto-routed', { from: model, to: routedModel });
     activeOptions = { ...options, config: { ...config, model: routedModel } };
+    setSubagentContext(provider, routedModel);
   }
 
   // Subscribe to tool:result events to collect per-turn confirmation stats

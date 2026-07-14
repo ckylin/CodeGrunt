@@ -144,6 +144,7 @@ export async function executeToolCall(
     edit_file: ['path', 'old_string', 'new_string'],
     execute_shell: ['command'],
     search_files: ['pattern'],
+    agent_open: ['task'],
   };
   const required = requiredParams[name];
   if (required) {
@@ -202,8 +203,8 @@ export async function executeToolCall(
     args._confirmDurationMs = confirmDurationMs;
   }
 
-  // Inject cwd into execute_shell if not provided
-  if (name === 'execute_shell' && cwd && !args.cwd) {
+  // Inject cwd into execute_shell / agent_open if not provided
+  if ((name === 'execute_shell' || name === 'agent_open') && cwd && !args.cwd) {
     args.cwd = cwd;
   }
 

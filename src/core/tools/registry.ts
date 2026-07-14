@@ -15,6 +15,7 @@ import { searchFilesTool } from './search_files.js';
 import { memoryWriteTool, memoryReadTool } from './memory.js';
 import { webSearchTool } from './web_search.js';
 import { codeSearchTool } from './code_search.js';
+import { agentOpenTool } from './agent_open.js';
 import { getLogger } from '../observability/logger.js';
 
 const log = getLogger('tools:registry');
@@ -96,6 +97,7 @@ class ToolRegistry {
       memoryReadTool,
       webSearchTool,
       codeSearchTool,
+      agentOpenTool,
     ];
     for (const tool of builtins) {
       this.register(tool, 'builtin');

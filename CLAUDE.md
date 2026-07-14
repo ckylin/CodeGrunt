@@ -20,13 +20,14 @@ npx vitest run tests/tools/read_file.test.ts
 CodeGrunt is a terminal-native agentic coding assistant using a **P/G/E (Planner / Generator / Evaluator) + Intentor** architecture powered by a Harness-style pipeline engine.
 
 - `src/cli/` — entry point, REPL loop, argument parsing, slash commands, skills, @-reference resolver, **Ink/React terminal UI** components
-- `src/core/agent/` — Intentor (intent + skill classification), Planner (task decomposition), Generator (pipeline-based execution), Evaluator (quality check + auto-refine)
+- `src/core/agent/` — Intentor (intent + skill classification), Planner (task decomposition), Generator (pipeline-based execution), Evaluator (quality check + auto-refine), Subagent (`subagent.ts` — isolated read-only sub-task execution)
 - `src/core/pipeline/` — Harness-style pipeline engine (5 stages: prepare context → stream response → process tools → post-process), sharing a `PipelineContext`
-- `src/core/tools/` — 8 built-in tools: file read/write/edit, shell execution, directory listing, search, memory read/write (`memory.ts`). `ToolRegistry` manages registration internally
+- `src/core/tools/` — 11 built-in tools: file read/write/edit, shell execution, directory listing, search, memory read/write (`memory.ts`), web search, code search, `agent_open` (sub-agent delegation). `ToolRegistry` manages registration internally
   - `read_file`: supports `start_line`/`end_line` params; 100KB limit (files >100KB return line count with instructions to use line range)
   - `execute_shell`: `timeout_ms` capped at 300s (5 min); reports captured bytes on timeout
   - `search_files`: `is_regex` (boolean) and `include_hidden` (boolean) params
   - `list_directory`: default limit 500 entries, `max_entries` param up to 2000
+  - `agent_open`: delegates a focused research question to an isolated sub-agent (see Subagent section below)
 - `src/core/context/` — context window management (token budget, trimming) and project guide loading
 - `src/core/events/` — typed EventBus for pipeline/tool/LLM lifecycle events
 - `src/core/observability/` — structured Logger (v2: file transport, trace IDs, log rotation) + lightweight Metrics (counters, timers, snapshots)
@@ -55,6 +56,16 @@ CodeGrunt is a terminal-native agentic coding assistant using a **P/G/E (Planner
 **Model branching**: `isReasonerModel()` detects R1 variants; `supportsReasoning()` matches V4/Pro models that emit `reasoning_content`. Context budgets: 100k tokens for reasoning models, 90k for chat models. `reasoning_content` is only sent back for the last assistant message (not full history) to reduce token cost.
 
 **Context compaction**: Triggers at 50% token budget (was 80%) or when non-system message count exceeds 30. Keeps 15 recent messages (was 6), summary token limit 1500 (was 512).
+
+## Sub-agent Execution (`src/core/agent/subagent.ts`)
+
+`agent_open` lets the main agent delegate a focused research question to an isolated sub-agent. v1 is synchronous and single-flight: one call blocks until the sub-agent produces a final text answer or hits `MAX_SUBAGENT_ITERATIONS` (10).
+
+- **Read-only tool set**: `SUBAGENT_TOOL_NAMES` restricts sub-agents to `read_file`, `search_files`, `list_directory`, `code_search`, `web_search`, `memory_read`. No `write_file`/`edit_file`/`execute_shell` — this sidesteps the confirm-dialog stdin/stdout contention that concurrent sub-agents running destructive tools would create, and means sub-agent tool calls never go through `confirmOrSkip`.
+- **Isolated context**: sub-agents get a fresh `Message[]` array (system + user only) — they never see the calling agent's conversation history.
+- **Model tier**: always downgraded to `deepseek-v4-flash` for DeepSeek models (same policy as Intentor classification calls) — research delegation doesn't need the caller's configured model tier.
+- **Wiring**: `setSubagentContext(provider, model)` is called once per turn in `runAgentLoop` (and again after model auto-routing) so the `agent_open` tool — which only receives `args: Record<string, unknown>`, not the provider — can reach the LLM. Mirrors the `setTrustMode()` module-level-state pattern in `process-tools-helpers.ts`.
+- **Not yet implemented**: concurrent/non-blocking sub-agents (CodeWhale-style `agent_open` fan-out). The current tool is one-at-a-time by design — see the roadmap (v0.5) for future concurrent execution.
 
 ## Provider System
 

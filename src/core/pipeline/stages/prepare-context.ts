@@ -90,12 +90,17 @@ Use \`cmd1 && cmd2\` to chain commands. Avoid interactive commands. The cwd is a
 Use \`memory_write\` to record facts worth preserving across sessions: user preferences, project decisions, recurring patterns, API keys to avoid.
 Use \`memory_read\` to retrieve them. Check memory at the start of a session if the user references something you may have stored.`;
 
+  // Sub-agent delegation
+  const subagentTools = `## Sub-agent delegation
+
+Use \`agent_open\` to delegate a focused, read-only research question (e.g. "how is auth implemented in this repo?") to an isolated sub-agent instead of doing the investigation yourself. This keeps your own context free of intermediate read/search noise. The sub-agent can only read/search — it cannot write files or run commands. Only use it for genuinely separable sub-questions, not as a substitute for reading files you need directly.`;
+
   // Anti-hallucination
   const antiHallucination = `## Anti-hallucination
 
 Every piece of code you write must be grounded in something you have read during this session — a file, a search result, a tool output. If you haven't read the relevant file yet, read it first. Do not rely on training-data assumptions about what a project looks like.`;
 
-  let prompt = [identity, outputDiscipline, toolWorkflow, shellFailureHandling, codeQuality, antiHallucination, memoryTools].join('\n\n');
+  let prompt = [identity, outputDiscipline, toolWorkflow, shellFailureHandling, codeQuality, antiHallucination, memoryTools, subagentTools].join('\n\n');
 
   if (guide) {
     prompt += `\n\n---\n\n${guide}`;
