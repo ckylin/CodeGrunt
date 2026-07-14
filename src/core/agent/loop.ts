@@ -25,7 +25,8 @@ import ora from 'ora';
 import { ContextManager } from '../context/manager.js';
 import { loadProjectGuide } from '../context/project-guide.js';
 import { getToolDefinitions } from '../tools/registry.js';
-import { resetYesAll, isYesAllActive, setTrustMode } from '../pipeline/stages/process-tools-helpers.js';
+import { resetYesAll, isYesAllActive, setTrustMode, setWorkspacePermissions } from '../pipeline/stages/process-tools-helpers.js';
+import { loadWorkspacePermissions } from '../permissions/index.js';
 import { confirmYesNo } from '../../utils/confirm.js';
 import { detectInputLanguage } from '../memory/habits.js';
 import type { TurnSignal } from '../../types.js';
@@ -42,7 +43,7 @@ import { isReasonerModel } from '../../config.js';
 import { saveSessionSummary } from '../memory/store.js';
 import { getHookRegistry } from '../hooks/registry.js';
 import { createSnapshot } from '../snapshot/index.js';
-import { setSubagentContext } from './subagent.js';
+import { setSubagentContext, runSubagent } from './subagent.js';
 
 // ── P/G/E modules ────────────────────────────────────────────────────────
 import { detectIntent, selectModelForTask } from './intentor.js';
@@ -319,6 +320,9 @@ export async function runAgentLoop(options: AgentRunOptions): Promise<void> {
   // turn before any tool call can run. Updated again below once the model is
   // auto-routed, so sub-agents inherit the same tier as the main turn.
   setSubagentContext(provider, model);
+  // Workspace permissions are optional and best-effort — a missing or invalid
+  // .codegrunt/permissions.json should never block the turn from starting.
+  setWorkspacePermissions(await loadWorkspacePermissions(cwd).catch(() => null));
 
   // Auto-compact: if the context flagged itself as near-capacity on the previous
   // turn, summarize before running the next agent turn so history is preserved
@@ -433,10 +437,29 @@ async function runSkillFlow(
 ): Promise<{ responseLength: number }> {
   const { onToolCall, onToolResult, signal } = options;
 
-  log.info('Skill flow', { skill: skill.name });
+  log.info('Skill flow', { skill: skill.name, mode: skill.mode ?? 'inline' });
   process.stdout.write(chalk.gray(`  skill: ${skill.name}\n`));
 
   const skillTask = `${skill.content}\n\n---\n${options.task}`;
+
+  // Subagent-mode skills run in an isolated, read-only context (no write/edit/shell,
+  // no shared conversation history) via the same loop agent_open uses. Useful for
+  // research-style skills that shouldn't be able to mutate the workspace.
+  if (skill.mode === 'subagent') {
+    const result = await runSubagent({
+      task: skillTask,
+      cwd: options.cwd,
+      provider: options.provider,
+      model: options.config.model,
+      systemOverride: skill.system,
+      signal,
+    });
+    if (options.onText && result.output) options.onText(result.output);
+    log.info('Skill flow complete (subagent)', { skill: skill.name, iterations: result.iterations, toolCallCount: result.toolCallCount });
+    metrics.increment('agent.skill_turns');
+    return { responseLength: result.output.length };
+  }
+
   const skillOptions: AgentRunOptions = {
     ...options,
     task: skillTask,

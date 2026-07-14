@@ -150,6 +150,32 @@ async function checkRust(cwd: string): Promise<DiagnosticResult | null> {
   };
 }
 
+// ── ESLint ────────────────────────────────────────────────────────────────
+
+async function checkEslint(cwd: string): Promise<DiagnosticResult | null> {
+  const configs = [
+    '.eslintrc.js', '.eslintrc.cjs', '.eslintrc.json', '.eslintrc.yaml', '.eslintrc.yml',
+    'eslint.config.js', 'eslint.config.mjs', 'eslint.config.cjs',
+  ];
+  if (!configs.some(f => existsSync(join(cwd, f)))) return null;
+
+  const { exitCode, output } = await runCommand('npx eslint . --format=compact 2>&1', cwd);
+  if (exitCode === -1 || exitCode === 0) return null;
+
+  const errorLines = output.split('\n').filter(l => /:\s+error\s+/.test(l));
+  const errorCount = errorLines.length;
+  if (errorCount === 0) return null;
+
+  return {
+    language: 'ESLint',
+    errorCount,
+    warningCount: 0,
+    summary: `${errorCount} error${errorCount !== 1 ? 's' : ''}`,
+    output: output.trim().slice(0, 600),
+    passed: false,
+  };
+}
+
 // ── Main export ───────────────────────────────────────────────────────────
 
 /**
@@ -163,6 +189,7 @@ export async function runDiagnostics(cwd: string): Promise<DiagnosticResult[]> {
     checkPython(cwd),
     checkGo(cwd),
     checkRust(cwd),
+    checkEslint(cwd),
   ]);
 
   const diagnostics: DiagnosticResult[] = [];

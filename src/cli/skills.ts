@@ -11,6 +11,11 @@ export interface Skill {
    *  coding-assistant identity for the skill session, allowing the skill
    *  to define a completely different role (e.g. "You are a BaZi master"). */
   system?: string;
+  /** 'subagent' routes this skill through the isolated read-only sub-agent
+   *  loop (src/core/agent/subagent.ts) instead of the main chat loop —
+   *  useful for research-style skills that shouldn't touch write/edit/shell
+   *  tools or pollute the caller's conversation history. Defaults to 'inline'. */
+  mode?: 'inline' | 'subagent';
   content: string;
   source: 'project' | 'global';
   file: string; // relative file name
@@ -94,6 +99,7 @@ async function loadSkillsFromDir(dir: string, source: 'project' | 'global'): Pro
           name: skillName,
           description: meta['description'],
           system: meta['system'],
+          mode: meta['mode'] === 'subagent' ? 'subagent' : 'inline',
           content: body,
           source,
           file: entry.name,
@@ -117,6 +123,7 @@ async function loadSkillsFromDir(dir: string, source: 'project' | 'global'): Pro
         const parts: string[] = [];
         let description: string | undefined;
         let system: string | undefined;
+        let mode: string | undefined;
         let frontmatterName: string | undefined;
 
         for (const md of mdFiles) {
@@ -124,6 +131,7 @@ async function loadSkillsFromDir(dir: string, source: 'project' | 'global'): Pro
           const { meta, body } = parseFrontmatter(raw);
           if (!description && meta['description']) description = meta['description'];
           if (!system && meta['system']) system = meta['system'];
+          if (!mode && meta['mode']) mode = meta['mode'];
           if (!frontmatterName && meta['name']) frontmatterName = meta['name'];
           parts.push(body);
         }
@@ -132,6 +140,7 @@ async function loadSkillsFromDir(dir: string, source: 'project' | 'global'): Pro
           name: frontmatterName ?? entry.name,
           description,
           system,
+          mode: mode === 'subagent' ? 'subagent' : 'inline',
           content: parts.join('\n\n'),
           source,
           file: entry.name + '/',
@@ -155,20 +164,29 @@ export function getProjectSkillsDir(cwd: string): string {
   return resolve(cwd, '.codegrunt', 'skills');
 }
 
-/** Load skills from project (.codegrunt/skills/) and global (~/.codegrunt/skills/) directories */
+/** Claude Code compatible project skills directory: .claude/skills/ */
+export function getClaudeSkillsDir(cwd: string): string {
+  return resolve(cwd, '.claude', 'skills');
+}
+
+/** Load skills from project (.codegrunt/skills/), Claude-format (.claude/skills/),
+ *  and global (~/.codegrunt/skills/) directories. Precedence on name collision:
+ *  .codegrunt/skills/ > .claude/skills/ > ~/.codegrunt/skills/. */
 export async function loadSkills(cwd: string): Promise<Skill[]> {
   const projectDir = getProjectSkillsDir(cwd);
+  const claudeDir = getClaudeSkillsDir(cwd);
   const globalDir = getGlobalSkillsDir();
 
-  const [projectSkills, globalSkills] = await Promise.all([
+  const [projectSkills, claudeSkills, globalSkills] = await Promise.all([
     loadSkillsFromDir(projectDir, 'project'),
+    loadSkillsFromDir(claudeDir, 'project'),
     loadSkillsFromDir(globalDir, 'global'),
   ]);
 
-  // Project skills take precedence over global ones with the same name
+  // Project skills take precedence over Claude-format and global ones with the same name
   const seen = new Set<string>();
   const result: Skill[] = [];
-  for (const skill of [...projectSkills, ...globalSkills]) {
+  for (const skill of [...projectSkills, ...claudeSkills, ...globalSkills]) {
     if (!seen.has(skill.name)) {
       seen.add(skill.name);
       result.push(skill);

@@ -41,6 +41,8 @@ export interface SubagentRunOptions {
   cwd: string;
   provider: LLMProvider;
   model: string;
+  /** Replaces the default read-only research-agent system prompt (used by Skills v2 subagent mode). */
+  systemOverride?: string;
   signal?: AbortSignal;
 }
 
@@ -74,7 +76,7 @@ export async function runSubagent(options: SubagentRunOptions): Promise<Subagent
   const toolDefs = getSubagentToolDefinitions();
 
   const messages: Message[] = [
-    { role: 'system', content: buildSubagentSystemPrompt(cwd) },
+    { role: 'system', content: options.systemOverride ?? buildSubagentSystemPrompt(cwd) },
     { role: 'user', content: task },
   ];
 

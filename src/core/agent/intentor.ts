@@ -203,7 +203,7 @@ function parseIntentResult(raw: string, fallback: boolean, skills: Skill[]): Int
       if (parsed.matchedSkill) {
         const skill = skills.find((s) => s.name.toLowerCase() === parsed.matchedSkill!.toLowerCase());
         if (skill) {
-          matchedSkill = { name: skill.name, content: skill.content, system: skill.system };
+          matchedSkill = { name: skill.name, content: skill.content, system: skill.system, mode: skill.mode };
         }
       }
 
@@ -280,7 +280,7 @@ export async function detectIntent(
       confidence: 85,
       reason: `matched skill: ${skillMatch.name}`,
       
-      matchedSkill: { name: skillMatch.name, content: skillMatch.content, system: skillMatch.system },
+      matchedSkill: { name: skillMatch.name, content: skillMatch.content, system: skillMatch.system, mode: skillMatch.mode },
     };
   }
 

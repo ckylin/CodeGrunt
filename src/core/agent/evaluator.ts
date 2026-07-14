@@ -5,7 +5,7 @@
 //   1. Tool errors: any tool result matching known error patterns → fail
 //   2. Empty response: no tool calls AND no text output → fail
 //   3. Blind write: write/edit without a prior read this session → warning only
-//   4. TypeScript typecheck: if write/edit occurred and tsconfig.json exists → run tsc
+//   4. Language diagnostics: if write/edit occurred → run tsc/pyright/go vet/cargo check/eslint (via lsp/checker.ts)
 //
 // Rationale: LLM-based evaluation was too expensive (one extra call per step)
 // and too inconsistent (same model evaluating its own output). Structural
@@ -16,9 +16,7 @@ import type { PlanStep, EvaluationResult } from '../pipeline/types.js';
 import { WRITE_TOOL_NAMES } from '../pipeline/types.js';
 import { getLogger } from '../observability/logger.js';
 import { getDefaultMetrics } from '../observability/metrics.js';
-import { exec } from 'child_process';
-import { existsSync } from 'fs';
-import path from 'path';
+import { runDiagnostics } from '../lsp/checker.js';
 
 const log = getLogger('evaluator');
 
@@ -149,27 +147,6 @@ function classifyShellFailure(content: string): ShellDiagnosis {
   };
 }
 
-// ── TypeScript typecheck helper ───────────────────────────────────────────
-
-function runTsc(cwd: string): Promise<{ exitCode: number; output: string }> {
-  return new Promise(resolve => {
-    const timer = setTimeout(() => {
-      child.kill();
-      resolve({ exitCode: -1, output: '' });
-    }, 15000);
-
-    const child = exec(
-      'npx tsc --noEmit --skipLibCheck 2>&1',
-      { cwd, windowsHide: true },
-      (err, stdout) => {
-        clearTimeout(timer);
-        const exitCode = err?.code ?? 0;
-        resolve({ exitCode: typeof exitCode === 'number' ? exitCode : (err ? 1 : 0), output: stdout });
-      },
-    );
-  });
-}
-
 // ── Structural checks ─────────────────────────────────────────────────────
 
 function structuralChecks(
@@ -268,28 +245,26 @@ export async function evaluateStep(
 
   const result = structuralChecks(currentTurnToolCalls, currentTurnToolResults, sessionHasRead, assistantText);
 
-  // Check 4: TypeScript typecheck — run tsc after write/edit if tsconfig.json exists
-  // Skip if structural checks already require a retry (no point typechecking broken output)
+  // Check 4: language diagnostics — run tsc/pyright/go vet/cargo check/eslint after write/edit
+  // Skip if structural checks already require a retry (no point diagnosing broken output)
   if (!result.requiresRetry && cwd) {
     const hasWriteOrEdit = currentTurnToolCalls.some(tc =>
       tc.name === 'write_file' || tc.name === 'edit_file'
     );
     if (hasWriteOrEdit) {
-      const tsconfigPath = path.join(cwd, 'tsconfig.json');
-      if (existsSync(tsconfigPath)) {
-        try {
-          const { exitCode, output } = await runTsc(cwd);
-          if (exitCode !== 0 && exitCode !== -1 && output.trim()) {
-            const snippet = output.trim().slice(0, 800);
-            result.issues.push(`TypeScript errors detected: ${snippet}`);
-            result.suggestions.push('Fix the TypeScript errors before continuing');
-            result.passed = false;
-            result.requiresRetry = true;
-            result.score = Math.max(0, result.score - 30);
-          }
-        } catch {
-          // tsc not found or unexpected error — silently skip
+      try {
+        const diagnostics = await runDiagnostics(cwd);
+        const failed = diagnostics.filter(d => !d.passed);
+        if (failed.length > 0) {
+          const snippet = failed.map(d => `${d.language}: ${d.output}`).join('\n').slice(0, 800);
+          result.issues.push(`Diagnostics failed: ${snippet}`);
+          result.suggestions.push('Fix the errors shown above before continuing');
+          result.passed = false;
+          result.requiresRetry = true;
+          result.score = Math.max(0, result.score - 30);
         }
+      } catch {
+        // checkers not found or unexpected error — silently skip
       }
     }
   }

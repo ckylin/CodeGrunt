@@ -20,6 +20,8 @@ import { addMcpServer, removeMcpServer, loadMcpConfig } from '../core/mcp/config
 import type { McpServerConfig } from '../core/mcp/types.js';
 import { getToolRegistry } from '../core/tools/registry.js';
 import { buildIndex, loadIndex } from '../core/index/index.js';
+import { exportSwebenchPrediction } from '../core/swebench/export.js';
+import { loadWorkspacePermissions, setToolPermission, resetToolPermission, type PermissionAction } from '../core/permissions/index.js';
 
 
 export interface CommandDescriptor {
@@ -45,6 +47,8 @@ export const BUILTIN_COMMANDS: CommandDescriptor[] = [
   { name: 'search-engine', desc: 'Set web search engine: mojeek (default) / searxng / duckduckgo' },
   { name: 'mcp',       desc: 'Manage MCP servers: /mcp list | add | remove' },
   { name: 'index',     desc: 'Build or update the code symbol index for this project' },
+  { name: 'swebench',  desc: 'Export current session diff as a SWE-bench prediction (/swebench <instance-id>)' },
+  { name: 'permissions', desc: 'View or set per-tool permissions: /permissions | set <tool> <allow|deny|ask> | reset <tool>' },
   { name: 'review',  desc: 'Review session changes for logic issues' },
   { name: 'clear',   desc: 'Clear conversation context' },
   { name: 'cost',    desc: 'Show session token usage and cost' },
@@ -160,6 +164,14 @@ export async function handleSlashCommand(
       await handleIndex(cwd);
       return { type: 'handled' };
 
+    case 'swebench':
+      await handleSwebench(rest, cwd, config);
+      return { type: 'handled' };
+
+    case 'permissions':
+      await handlePermissions(rest, cwd);
+      return { type: 'handled' };
+
     default: {
       console.log(chalk.yellow(`Unknown command: /${cmd}. Type /help for available commands.`));
       return { type: 'handled' };
@@ -210,6 +222,10 @@ ${chalk.bold('Slash Commands')}
   ${chalk.cyan('/trust <mode>')}      Switch directly: /trust plan | /trust code | /trust auto
   ${chalk.cyan('/restore')}           List and restore working tree to a previous snapshot
   ${chalk.cyan('/restore <hash>')}    Restore to a specific snapshot by hash prefix
+  ${chalk.cyan('/swebench <id>')}     Export current session diff as a SWE-bench prediction (JSONL)
+  ${chalk.cyan('/permissions')}       Show per-tool permission overrides
+  ${chalk.cyan('/permissions set <tool> <allow|deny|ask>')}  Set a tool's permission
+  ${chalk.cyan('/permissions reset <tool>')}                 Remove a tool's permission override
 ${skillsSection}
 ${chalk.bold('@ References')}
 
@@ -830,7 +846,7 @@ async function handleSkills(
     console.log(`\n${chalk.gray('No skills loaded.')}`);
     console.log(chalk.gray(`Create one with ${chalk.cyan('/skills create <name>')}`));
     console.log(chalk.gray(`Or add .md files to ${chalk.gray(getGlobalSkillsDir())}`));
-    console.log(chalk.gray(`Project skills: ${chalk.gray('.codegrunt/skills/')}`));
+    console.log(chalk.gray(`Project skills: ${chalk.gray('.codegrunt/skills/')} (also reads .claude/skills/ for Claude Code compat)`));
     return { type: 'handled' };
   }
 
@@ -848,6 +864,7 @@ async function handleSkills(
   console.log(chalk.gray(`Create: ${chalk.cyan('/skills create <name>')}`));
   console.log(chalk.gray(`Global dir: ${chalk.gray(getGlobalSkillsDir())}`));
   console.log(chalk.gray(`Project dir: ${chalk.gray('.codegrunt/skills/')}`));
+  console.log(chalk.gray(`Claude-format dir: ${chalk.gray('.claude/skills/')}`));
 
   return { type: 'handled' };
 }
@@ -1031,6 +1048,82 @@ async function handleRestore(rest: string[], cwd: string): Promise<void> {
   } catch (err) {
     console.log(chalk.red(`Restore failed: ${err instanceof Error ? err.message : String(err)}`));
   }
+}
+
+// ── /swebench ─────────────────────────────────────────────────────────────────
+// /swebench <instance-id>       — export current working-tree diff as a SWE-bench prediction
+// /swebench run <instance-id>   — alias for the above
+
+async function handleSwebench(rest: string[], cwd: string, config: CodeGruntConfig): Promise<void> {
+  const args = rest[0]?.toLowerCase() === 'run' ? rest.slice(1) : rest;
+  const instanceId = args[0];
+
+  if (!instanceId) {
+    console.log(chalk.yellow('Usage: /swebench <instance-id>'));
+    return;
+  }
+
+  try {
+    const { outputPath, patchLength } = await exportSwebenchPrediction({
+      cwd,
+      instanceId,
+      modelName: config.model,
+    });
+    console.log(chalk.green(`✓ Exported prediction for ${chalk.cyan(instanceId)}`));
+    console.log(chalk.gray(`  ${outputPath}  (${patchLength} bytes of diff)`));
+  } catch (err) {
+    console.log(chalk.red(`SWE-bench export failed: ${err instanceof Error ? err.message : String(err)}`));
+  }
+}
+
+// ── /permissions ──────────────────────────────────────────────────────────────
+// /permissions                       — show current .codegrunt/permissions.json
+// /permissions set <tool> <action>   — set a tool's permission (allow|deny|ask)
+// /permissions reset <tool>          — remove a tool's permission override
+
+const PERMISSION_ACTIONS = ['allow', 'deny', 'ask'] as const;
+
+async function handlePermissions(rest: string[], cwd: string): Promise<void> {
+  const sub = rest[0]?.toLowerCase();
+
+  if (sub === 'set') {
+    const toolName = rest[1];
+    const action = rest[2]?.toLowerCase();
+    if (!toolName || !action || !PERMISSION_ACTIONS.includes(action as PermissionAction)) {
+      console.log(chalk.yellow('Usage: /permissions set <tool> <allow|deny|ask>'));
+      return;
+    }
+    const updated = await setToolPermission(cwd, toolName, action as PermissionAction);
+    console.log(chalk.green(`✓ ${toolName} → ${action}`));
+    console.log(chalk.gray(JSON.stringify(updated, null, 2)));
+    return;
+  }
+
+  if (sub === 'reset') {
+    const toolName = rest[1];
+    if (!toolName) {
+      console.log(chalk.yellow('Usage: /permissions reset <tool>'));
+      return;
+    }
+    const updated = await resetToolPermission(cwd, toolName);
+    console.log(chalk.green(`✓ Removed permission override for ${toolName}`));
+    console.log(chalk.gray(JSON.stringify(updated, null, 2)));
+    return;
+  }
+
+  // Default: show current permissions
+  const permissions = await loadWorkspacePermissions(cwd);
+  if (!permissions || Object.keys(permissions.tools).length === 0) {
+    console.log(chalk.gray('\nNo workspace permissions configured (.codegrunt/permissions.json).'));
+    console.log(chalk.gray('All tools defer to the current trust mode (/trust).\n'));
+    return;
+  }
+  console.log(chalk.bold('\nWorkspace permissions (.codegrunt/permissions.json):\n'));
+  for (const [tool, action] of Object.entries(permissions.tools)) {
+    const label = action === 'deny' ? chalk.red(action) : action === 'ask' ? chalk.yellow(action) : chalk.green(action);
+    console.log(`  ${chalk.cyan(tool)}: ${label}`);
+  }
+  console.log();
 }
 
 // ── /mcp ──────────────────────────────────────────────────────────────────────

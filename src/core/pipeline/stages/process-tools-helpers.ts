@@ -13,6 +13,7 @@ import { resolve } from 'path';
 import type { ToolResult } from '../../../types.js';
 import { getToolByName } from '../../tools/registry.js';
 import { confirmEdit, confirmShellCommand, applyEdit } from '../../../utils/confirm.js';
+import { getToolPermission, type WorkspacePermissions, type PermissionAction } from '../../permissions/index.js';
 
 // ── Tool-call JSON repair ─────────────────────────────────────────────────
 //
@@ -66,6 +67,16 @@ export function repairToolArgs(argsJson: string): Record<string, unknown> | null
 
 let yesAllSessionActive = false;
 let currentTrustMode: 'plan' | 'code' | 'auto' = 'code';
+let currentPermissions: WorkspacePermissions | null = null;
+
+/** Set the active workspace permissions (.codegrunt/permissions.json). Called once per turn. */
+export function setWorkspacePermissions(permissions: WorkspacePermissions | null): void {
+  currentPermissions = permissions;
+}
+
+export function getWorkspacePermissions(): WorkspacePermissions | null {
+  return currentPermissions;
+}
 
 export function resetYesAll(): void {
   yesAllSessionActive = false;
@@ -91,8 +102,10 @@ async function confirmOrSkip(
   filePath: string,
   newContent: string,
   preReadOriginal?: string,
+  permAction?: PermissionAction | null,
 ): Promise<{ accepted: boolean; originalContent: string }> {
-  if (yesAllSessionActive) {
+  // permission 'allow' always skips the prompt; 'ask' always forces one even in auto mode
+  if (permAction === 'allow' || (yesAllSessionActive && permAction !== 'ask')) {
     const absPath = resolve(filePath);
     const original = preReadOriginal !== undefined
       ? preReadOriginal
@@ -101,18 +114,22 @@ async function confirmOrSkip(
   }
 
   const { choice, originalContent } = await confirmEdit(filePath, newContent, preReadOriginal);
-  if (choice === 'yes_all_session') {
+  if (choice === 'yes_all_session' && permAction !== 'ask') {
     yesAllSessionActive = true;
   }
   return { accepted: choice === 'yes' || choice === 'yes_all_session', originalContent };
 }
 
 /** Same confirm-or-skip flow as confirmOrSkip, but for shell commands (no file/diff). */
-async function confirmShellOrSkip(command: string, effectiveCwd: string): Promise<boolean> {
-  if (yesAllSessionActive) return true;
+async function confirmShellOrSkip(
+  command: string,
+  effectiveCwd: string,
+  permAction?: PermissionAction | null,
+): Promise<boolean> {
+  if (permAction === 'allow' || (yesAllSessionActive && permAction !== 'ask')) return true;
 
   const choice = await confirmShellCommand(command, effectiveCwd);
-  if (choice === 'yes_all_session') {
+  if (choice === 'yes_all_session' && permAction !== 'ask') {
     yesAllSessionActive = true;
   }
   return choice === 'yes' || choice === 'yes_all_session';
@@ -155,9 +172,21 @@ export async function executeToolCall(
     }
   }
 
+  const permAction = getToolPermission(currentPermissions, name);
+
+  // ── Workspace permissions: hard deny takes precedence over everything ──
+  if (permAction === 'deny') {
+    return {
+      success: false,
+      output: '',
+      error: `[permissions] Tool "${name}" is denied by .codegrunt/permissions.json.`,
+      userRejected: true,
+    };
+  }
+
   // ── Plan mode: block all destructive operations ───────────────────────
   const DESTRUCTIVE_TOOLS = new Set(['write_file', 'edit_file', 'execute_shell']);
-  if (currentTrustMode === 'plan' && DESTRUCTIVE_TOOLS.has(name)) {
+  if (currentTrustMode === 'plan' && DESTRUCTIVE_TOOLS.has(name) && permAction !== 'allow') {
     return {
       success: false,
       output: '',
@@ -182,7 +211,7 @@ export async function executeToolCall(
     }
 
     const confirmStart = Date.now();
-    const { accepted } = await confirmOrSkip(filePath, preview, original);
+    const { accepted } = await confirmOrSkip(filePath, preview, original, permAction);
     const confirmDurationMs = Date.now() - confirmStart;
     if (!accepted) {
       return { success: false, output: '', error: 'Edit rejected by user.', userRejected: true, confirmDurationMs };
@@ -194,7 +223,7 @@ export async function executeToolCall(
     const content = args.content as string;
 
     const confirmStart = Date.now();
-    const { accepted, originalContent } = await confirmOrSkip(filePath, content);
+    const { accepted, originalContent } = await confirmOrSkip(filePath, content, undefined, permAction);
     const confirmDurationMs = Date.now() - confirmStart;
     if (!accepted) {
       return { success: false, output: '', error: 'Write rejected by user.', userRejected: true, confirmDurationMs };
@@ -216,7 +245,7 @@ export async function executeToolCall(
     const command = args.command as string;
     const effectiveCwd = (args.cwd as string | undefined) ?? cwd ?? process.cwd();
     const confirmStart = Date.now();
-    const accepted = await confirmShellOrSkip(command, effectiveCwd);
+    const accepted = await confirmShellOrSkip(command, effectiveCwd, permAction);
     const confirmDurationMs = Date.now() - confirmStart;
     if (!accepted) {
       return { success: false, output: '', error: 'Command rejected by user.', userRejected: true, confirmDurationMs };

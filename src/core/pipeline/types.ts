@@ -21,7 +21,7 @@ export interface IntentResult {
   /** Brief reason for the classification */
   reason: string;
   /** Matched skill, if the intent maps to a loaded skill */
-  matchedSkill?: { name: string; content: string; system?: string };
+  matchedSkill?: { name: string; content: string; system?: string; mode?: 'inline' | 'subagent' };
 }
 
 /** A single step in an execution plan */
