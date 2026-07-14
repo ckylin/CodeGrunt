@@ -185,15 +185,26 @@ export class MarkdownRenderer {
 
     for (const codeLine of lines) {
       const trimmed = codeLine.trimEnd();
-      const truncated = trimmed.length > innerW - 2
-        ? trimmed.slice(0, innerW - 5) + '…'
-        : trimmed;
-      const padded = truncated + ' '.repeat(Math.max(0, innerW - 2 - truncated.length));
+      const truncated = this.truncateToWidth(trimmed, innerW - 2);
+      const padded = truncated + ' '.repeat(Math.max(0, innerW - 2 - stringWidth(truncated)));
       out += muted('│ ') + chalk.white(padded) + muted(' │') + '\n';
     }
 
     out += muted('╰' + '─'.repeat(innerW) + '╯');
     return out;
+  }
+
+  private truncateToWidth(s: string, maxW: number): string {
+    if (stringWidth(s) <= maxW) return s;
+    let out = '';
+    let w = 0;
+    for (const ch of s) {
+      const cw = stringWidth(ch);
+      if (w + cw > maxW - 1) break;
+      out += ch;
+      w += cw;
+    }
+    return out + '…';
   }
 
   private isTableRow(line: string): boolean {
