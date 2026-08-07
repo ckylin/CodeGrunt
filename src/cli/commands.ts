@@ -17,6 +17,7 @@ import { getHookRegistry } from '../core/hooks/registry.js';
 import { listSnapshots, restoreSnapshot } from '../core/snapshot/index.js';
 import { getMcpManager } from '../core/mcp/manager.js';
 import { addMcpServer, removeMcpServer, loadMcpConfig } from '../core/mcp/config.js';
+import { searchMcpRegistry } from '../core/mcp/registry.js';
 import type { McpServerConfig } from '../core/mcp/types.js';
 import { getToolRegistry } from '../core/tools/registry.js';
 import { buildIndex, loadIndex } from '../core/index/index.js';
@@ -51,7 +52,7 @@ export const BUILTIN_COMMANDS: CommandDescriptor[] = [
   { name: 'restore',  desc: 'Restore working tree to a previous snapshot (/restore lists available)' },
   { name: 'baseurl',  desc: 'Set custom DeepSeek API base URL (for mirrors / proxies)' },
   { name: 'search-engine', desc: 'Set web search engine: mojeek (default) / searxng / duckduckgo' },
-  { name: 'mcp',       desc: 'Manage MCP servers: /mcp list | add | remove' },
+  { name: 'mcp',       desc: 'Manage MCP servers: /mcp list | add | remove | search' },
   { name: 'index',     desc: 'Build or update the code symbol index for this project (--semantic for vector search)' },
   { name: 'swebench',  desc: 'Export current session diff as a SWE-bench prediction (/swebench <instance-id>)' },
   { name: 'permissions', desc: 'View or set per-tool permissions: /permissions | set <tool> <allow|deny|ask> | reset <tool>' },
@@ -1217,10 +1218,12 @@ async function handlePermissions(rest: string[], cwd: string): Promise<void> {
 }
 
 // ── /mcp ──────────────────────────────────────────────────────────────────────
-// /mcp list                        — list configured servers and their status
-// /mcp add <name> stdio <command>  — add a stdio server
-// /mcp add <name> sse <url>        — add an SSE server
-// /mcp remove <name>               — remove a server
+// /mcp list                            — list configured servers and their status
+// /mcp add <name> stdio <command>      — add a stdio server
+// /mcp add <name> sse <url>            — add an SSE server
+// /mcp add <name> streamable-http <url> — add a Streamable HTTP server
+// /mcp remove <name>                   — remove a server
+// /mcp search <keyword>                — search the official MCP registry
 
 async function handleMcp(rest: string[]): Promise<void> {
   const sub = rest[0]?.toLowerCase();
@@ -1252,23 +1255,24 @@ async function handleMcp(rest: string[]): Promise<void> {
 
   if (sub === 'add') {
     const name = rest[1];
-    const transport = rest[2]?.toLowerCase() as 'stdio' | 'sse' | undefined;
+    const transport = rest[2]?.toLowerCase() as 'stdio' | 'sse' | 'streamable-http' | undefined;
     const target = rest.slice(3).join(' ');
 
     if (!name || !transport || !target) {
       console.log(chalk.yellow('Usage: /mcp add <name> stdio <command>'));
       console.log(chalk.yellow('       /mcp add <name> sse <url>'));
+      console.log(chalk.yellow('       /mcp add <name> streamable-http <url>'));
       return;
     }
 
-    if (transport !== 'stdio' && transport !== 'sse') {
-      console.log(chalk.yellow('Transport must be "stdio" or "sse"'));
+    if (transport !== 'stdio' && transport !== 'sse' && transport !== 'streamable-http') {
+      console.log(chalk.yellow('Transport must be "stdio", "sse", or "streamable-http"'));
       return;
     }
 
     const serverConfig: McpServerConfig = transport === 'stdio'
       ? { name, transport: 'stdio', command: target.split(' ')[0], args: target.split(' ').slice(1) }
-      : { name, transport: 'sse', url: target };
+      : { name, transport, url: target };
 
     await addMcpServer(serverConfig);
 
@@ -1302,8 +1306,38 @@ async function handleMcp(rest: string[]): Promise<void> {
     return;
   }
 
+  if (sub === 'search') {
+    const keyword = rest.slice(1).join(' ').trim();
+    if (!keyword) { console.log(chalk.yellow('Usage: /mcp search <keyword>')); return; }
+
+    console.log(chalk.gray(`\nSearching MCP registry for "${keyword}"...`));
+    const results = await searchMcpRegistry(keyword);
+
+    if (results.length === 0) {
+      console.log(chalk.gray('No servers found (or the registry is unreachable).\n'));
+      return;
+    }
+
+    console.log(`\n${chalk.bold('MCP Registry Results')}\n`);
+    for (const r of results) {
+      console.log(`  ${chalk.cyan(r.name)}`);
+      if (r.description) console.log(`    ${chalk.gray(r.description)}`);
+
+      if (r.install.kind === 'stdio') {
+        const cmd = `${r.install.command} ${r.install.args.join(' ')}`.trim();
+        console.log(`    ${chalk.gray('→')} /mcp add <name> stdio ${cmd}`);
+      } else if (r.install.kind === 'remote') {
+        console.log(`    ${chalk.gray('→')} /mcp add <name> ${r.install.transport} ${r.install.url}`);
+      } else {
+        console.log(`    ${chalk.gray('(no supported install method found)')}`);
+      }
+      console.log('');
+    }
+    return;
+  }
+
   console.log(chalk.yellow(`Unknown /mcp subcommand: ${sub}`));
-  console.log(chalk.gray('Available: list, add, remove'));
+  console.log(chalk.gray('Available: list, add, remove, search'));
 }
 
 // ── /index ────────────────────────────────────────────────────────────────────

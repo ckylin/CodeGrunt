@@ -1,6 +1,6 @@
 // ── MCP Types ─────────────────────────────────────────────────────────────
 
-export type McpTransport = 'stdio' | 'sse';
+export type McpTransport = 'stdio' | 'sse' | 'streamable-http';
 
 export interface McpServerConfig {
   name: string;
@@ -9,7 +9,7 @@ export interface McpServerConfig {
   command?: string;
   /** Args for stdio transport */
   args?: string[];
-  /** For SSE: the URL to connect to */
+  /** For SSE and Streamable HTTP: the URL to connect to */
   url?: string;
   /** Optional env vars to pass to stdio process */
   env?: Record<string, string>;

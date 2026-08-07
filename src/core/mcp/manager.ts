@@ -12,6 +12,7 @@
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import { SSEClientTransport } from '@modelcontextprotocol/sdk/client/sse.js';
+import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import type { McpServerConfig, McpServerState } from './types.js';
 import { loadMcpConfig } from './config.js';
 import { getLogger } from '../observability/logger.js';
@@ -108,6 +109,9 @@ export class McpClientManager {
     } else if (config.transport === 'sse') {
       if (!config.url) throw new Error(`MCP SSE server "${config.name}" requires a url`);
       transport = new SSEClientTransport(new URL(config.url));
+    } else if (config.transport === 'streamable-http') {
+      if (!config.url) throw new Error(`MCP Streamable HTTP server "${config.name}" requires a url`);
+      transport = new StreamableHTTPClientTransport(new URL(config.url));
     } else {
       throw new Error(`Unknown MCP transport: ${(config as McpServerConfig).transport}`);
     }
