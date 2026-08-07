@@ -14,6 +14,7 @@ const DEFAULTS: CodeGruntConfig = {
   apiKey: '',
   baseURL: 'https://api.deepseek.com',
   reasoningEffort: 'medium',
+  autoThinkingMode: true,
 };
 
 async function loadConfigFile(): Promise<Partial<CodeGruntConfig>> {
@@ -43,6 +44,15 @@ function envFloat(name: string, fallback: number | undefined): number | undefine
   return isNaN(n) ? fallback : n;
 }
 
+/** Parse a boolean env var ('1'/'true' → true, '0'/'false' → false), returning the fallback otherwise. */
+function envBool(name: string, fallback: boolean): boolean {
+  const raw = process.env[name];
+  if (raw === undefined) return fallback;
+  if (raw === '1' || raw.toLowerCase() === 'true') return true;
+  if (raw === '0' || raw.toLowerCase() === 'false') return false;
+  return fallback;
+}
+
 export async function loadConfig(): Promise<CodeGruntConfig> {
   const fileConfig = await loadConfigFile();
 
@@ -66,6 +76,7 @@ export async function loadConfig(): Promise<CodeGruntConfig> {
       ?? fileConfig.searchEngine
       ?? 'mojeek',
     searxngUrl: process.env.CODEGRUNT_SEARXNG_URL ?? fileConfig.searxngUrl,
+    autoThinkingMode: envBool("CODEGRUNT_AUTO_THINKING", fileConfig.autoThinkingMode ?? true),
   };
 }
 
@@ -77,6 +88,7 @@ export async function saveConfig(config: CodeGruntConfig): Promise<void> {
       {
         apiKey: config.apiKey,
         model: config.model,
+        baseURL: config.baseURL,
         maxTokens: config.maxTokens,
         temperature: config.temperature,
         reasoningEffort: config.reasoningEffort,
@@ -86,6 +98,7 @@ export async function saveConfig(config: CodeGruntConfig): Promise<void> {
         trustMode: config.trustMode,
         searchEngine: config.searchEngine,
         searxngUrl: config.searxngUrl,
+        autoThinkingMode: config.autoThinkingMode,
       },
       null,
       2,

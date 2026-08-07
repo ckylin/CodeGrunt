@@ -77,6 +77,8 @@ export interface PipelineContext {
   systemPrompt: string;
   /** Whether the model is a reasoner (R1) variant */
   isReasoner: boolean;
+  /** V4 thinking mode: 'enabled' | 'disabled' — set by complexity router */
+  thinking?: 'enabled' | 'disabled';
   /** User's task / input for this turn */
   task: string;
   /** Tool definitions to expose to the model */
@@ -155,6 +157,8 @@ export interface PipelineResult {
 // ── Streaming emitter (decouples LLM streaming from display) ─────────────
 
 export interface StreamEmitter {
+  /** Called once before streaming begins, to show a waiting indicator */
+  startThinking?(): void;
   onTextDelta(text: string): void;
   onReasoningDelta(text: string): void;
   onToolCallDelta(index: number, id?: string, name?: string, argsDelta?: string): void;

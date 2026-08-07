@@ -41,10 +41,17 @@ ${langInstruction}`;
 
   const osName = platform() === 'win32' ? 'Windows' : platform() === 'darwin' ? 'macOS' : 'Linux';
 
+  // Platform — pulled out as a top-level section so the model sees it before
+  // generating any tool calls. Burying it inside "Tool usage workflow" was too
+  // easy to miss.
+  const platformDetail = osName === 'Windows'
+    ? `- Shell is cmd.exe. Use Windows CMD syntax: dir, del, copy, move, rmdir /s, echo %VAR%, set VAR=value.\n- Paths use backslashes: C:\\Users\\...\n- Do NOT use Unix commands like ls, rm, cp, mv, echo $VAR, export. They will fail.`
+    : `- Shell is POSIX (bash/sh). Use standard Unix syntax: ls, rm, cp, mv, echo $VAR, export VAR=value.\n- Paths use forward slashes: /home/user/...\n- Do NOT use Windows CMD syntax. It will fail.`;
+
+  const platformSection = `## Platform\n\nYou are running on **${osName}**. Every shell command you generate MUST use ${osName} syntax.\n${platformDetail}\n`;
+
   // Strict tool-use workflow
   const toolWorkflow = `## Tool usage workflow
-
-**Platform:** You are running on ${osName}. All shell commands you generate must use the correct syntax for this OS (e.g., Windows CMD/PowerShell conventions on Windows, POSIX on Linux/macOS).
 
 **Always read before writing.**
 Use read_file or search_files on relevant files before any edit_file or write_file call. Writing without reading is how hallucinated APIs and broken imports happen.
@@ -100,7 +107,7 @@ Use \`agent_open\` to delegate a focused, read-only research question (e.g. "how
 
 Every piece of code you write must be grounded in something you have read during this session — a file, a search result, a tool output. If you haven't read the relevant file yet, read it first. Do not rely on training-data assumptions about what a project looks like.`;
 
-  let prompt = [identity, outputDiscipline, toolWorkflow, shellFailureHandling, codeQuality, antiHallucination, memoryTools, subagentTools].join('\n\n');
+  let prompt = [identity, platformSection, outputDiscipline, toolWorkflow, shellFailureHandling, codeQuality, antiHallucination, memoryTools, subagentTools].join('\n\n');
 
   if (guide) {
     prompt += `\n\n---\n\n${guide}`;

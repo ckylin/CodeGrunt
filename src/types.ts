@@ -121,6 +121,14 @@ export interface CodeGruntConfig {
   searchEngine?: 'mojeek' | 'searxng' | 'duckduckgo';
   /** SearXNG instance URL — used when searchEngine is 'searxng' */
   searxngUrl?: string;
+  /**
+   * When true (default), high-complexity coding tasks force `thinking: 'enabled'`
+   * on the routed model regardless of its default. Low-complexity tasks always
+   * force `thinking: 'disabled'` to save output tokens, independent of this flag.
+   * Thinking mode does not change per-token price — it only affects how many
+   * output tokens a response generates — so this defaults to on.
+   */
+  autoThinkingMode?: boolean;
 }
 
 // ── Habit tracking ──────────────────────────────────────────────────────────
@@ -162,4 +170,5 @@ export interface AgentRunOptions {
   /** Called at the end of each agent turn with observable behavior signals for habit tracking. */
   onTurnComplete?: (signal: TurnSignal) => void;
   signal?: AbortSignal;
+  thinking?: "enabled" | "disabled";
 }

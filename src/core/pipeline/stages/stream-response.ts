@@ -71,6 +71,11 @@ export class StreamResponseStage implements Stage {
 
     const accumulator = new Map<number, AccumulatedToolCall>();
 
+    // Show a waiting indicator before the first chunk arrives — otherwise
+    // non-reasoner models (no reasoning_delta) leave the terminal blank for
+    // the entire API round-trip.
+    emitter.startThinking?.();
+
     try {
       const stream = ctx.provider.stream(ctx.messages, {
         model: ctx.config.model,
@@ -80,6 +85,7 @@ export class StreamResponseStage implements Stage {
         topP: ctx.config.topP,
         frequencyPenalty: ctx.config.frequencyPenalty,
         presencePenalty: ctx.config.presencePenalty,
+        thinking: ctx.thinking,
         tools: ctx.toolDefinitions,
         signal: ctx.signal,
       });
