@@ -3,7 +3,7 @@ import type { LLMProvider, Message, CodeGruntConfig } from '../types.js';
 import type { ContextManager } from '../core/context/manager.js';
 import { DEEPSEEK_MODELS } from './setup.js';
 import { getSessionUsage } from '../core/usage.js';
-import { printBalanceAndUsage, formatDualCurrency, PRICING } from '../utils/billing.js';
+import { printBalanceAndUsage, formatDualCurrency, PRICING, getTodayUsage, getMonthUsage } from '../utils/billing.js';
 import type { Skill } from './skills.js';
 import { getGlobalSkillsDir, createSkill } from './skills.js';
 import { validateApiKey } from '../providers/deepseek/client.js';
@@ -22,7 +22,13 @@ import { getToolRegistry } from '../core/tools/registry.js';
 import { buildIndex, loadIndex } from '../core/index/index.js';
 import { exportSwebenchPrediction } from '../core/swebench/export.js';
 import { loadWorkspacePermissions, setToolPermission, resetToolPermission, type PermissionAction } from '../core/permissions/index.js';
+import {
+  loadBranchTree, saveBranchTree, getCurrentBranchId, getBranchList,
+  forkBranch, switchToBranch, deleteBranch, visualizeBranchTree, getCheckpoint,
+} from '../core/session/branching.js';
+import { getSubagentCacheStats, clearSubagentCache } from '../core/agent/subagent.js';
 
+import { handleBranch, handleTree, handleSwitchBranch, handleSubagentCache } from './branch-commands.js';
 
 export interface CommandDescriptor {
   name: string;
@@ -46,15 +52,21 @@ export const BUILTIN_COMMANDS: CommandDescriptor[] = [
   { name: 'baseurl',  desc: 'Set custom DeepSeek API base URL (for mirrors / proxies)' },
   { name: 'search-engine', desc: 'Set web search engine: mojeek (default) / searxng / duckduckgo' },
   { name: 'mcp',       desc: 'Manage MCP servers: /mcp list | add | remove' },
-  { name: 'index',     desc: 'Build or update the code symbol index for this project' },
+  { name: 'index',     desc: 'Build or update the code symbol index for this project (--semantic for vector search)' },
   { name: 'swebench',  desc: 'Export current session diff as a SWE-bench prediction (/swebench <instance-id>)' },
   { name: 'permissions', desc: 'View or set per-tool permissions: /permissions | set <tool> <allow|deny|ask> | reset <tool>' },
   { name: 'review',  desc: 'Review session changes for logic issues' },
   { name: 'clear',   desc: 'Clear conversation context' },
   { name: 'cost',    desc: 'Show session token usage and cost' },
+  { name: 'cache',   desc: 'Show detailed DeepSeek prefix cache performance statistics' },
+  { name: 'cost-report', desc: 'Show aggregated cost report with per-model breakdown' },
   { name: 'balance', desc: 'Show account balance & usage' },
   { name: 'help',    desc: 'Show full help message' },
-
+  { name: 'branch',  desc: 'Create a session branch from a historical turn: /branch <turn-number> [label]' },
+  { name: 'tree',    desc: 'Visualize the session branch tree' },
+  { name: 'switch',  desc: 'Switch to a different branch: /switch <branch-id>' },
+  { name: 'subagent-cache', desc: 'Show or clear the sub-agent result cache' },
+  { name: 'effort',  desc: 'Set reasoning effort: low (flash) / medium (auto) / high (pro+thinking)' },
 ];
 
 export type SlashCommandResult =
@@ -93,6 +105,22 @@ export async function handleSlashCommand(
       await compactContext(context, config, provider, cwd);
       return { type: 'handled' };
 
+    case 'branch':
+      await handleBranch(args, cwd, context, currentSessionId);
+      return { type: 'handled' };
+
+    case 'tree':
+      await handleTree(cwd, currentSessionId);
+      return { type: 'handled' };
+
+    case 'switch':
+      await handleSwitchBranch(args, cwd, context);
+      return { type: 'handled' };
+
+    case 'subagent-cache':
+      handleSubagentCache(args);
+      return { type: 'handled' };
+
     case 'init':
       await runInit(cwd, config, provider, args);
       return { type: 'handled' };
@@ -115,6 +143,14 @@ export async function handleSlashCommand(
       printSessionCost(config.model);
       return { type: 'handled' };
 
+    case 'cache':
+      printCacheStats();
+      return { type: 'handled' };
+
+    case 'cost-report':
+      await printCostReport(config.model);
+      return { type: 'handled' };
+
     case 'status':
       printSessionStatus(config.model, context, currentSessionId, config);
       return { type: 'handled' };
@@ -122,7 +158,6 @@ export async function handleSlashCommand(
     case 'balance':
       await printBalanceAndUsage(config.apiKey, config.baseURL, config.model);
       return { type: 'handled' };
-
 
     case 'skills':
       return await handleSkills(rest, skills);
@@ -161,7 +196,7 @@ export async function handleSlashCommand(
       return { type: 'handled' };
 
     case 'index':
-      await handleIndex(cwd);
+      await handleIndex(cwd, args);
       return { type: 'handled' };
 
     case 'swebench':
@@ -248,7 +283,7 @@ ${chalk.bold('Other')}
 
 function printSessionCost(model: string): void {
   const usage = getSessionUsage();
-  const pricing = PRICING[model] ?? PRICING['deepseek-chat'];
+  const pricing = PRICING[model] ?? PRICING['deepseek-v4-flash'];
 
   const inputCost = (usage.inputTokens / 1_000_000) * pricing.prompt;
   const outputCost = (usage.outputTokens / 1_000_000) * pricing.completion;
@@ -266,6 +301,61 @@ ${chalk.gray('─'.repeat(30))}
   ${chalk.gray('Output cost:')}  ${formatDualCurrency(outputCost)}${cacheSavings > 0 ? chalk.green(`\n  ${chalk.gray('Cache saved:')}  -${formatDualCurrency(cacheSavings)}`) : ''}
   ${chalk.bold('Session cost:')} ${formatDualCurrency(totalCost)}
 `);
+}
+
+// ── /cache ───────────────────────────────────────────────────────────────────
+
+function printCacheStats(): void {
+  const usage = getSessionUsage();
+  const totalInput = usage.inputTokens + usage.cacheHitTokens;
+  const hitRate = totalInput > 0 ? (usage.cacheHitTokens / totalInput * 100).toFixed(1) : '0.0';
+  const pricing = PRICING['deepseek-v4-flash'] ?? { prompt: 0.14, completion: 0.28, cacheHit: 0.0028 };
+  const saved = (usage.cacheHitTokens / 1_000_000) * (pricing.prompt - pricing.cacheHit);
+
+  console.log(`
+${chalk.bold('Cache Statistics')}
+  ${chalk.gray('Cache hit tokens:')} ${usage.cacheHitTokens.toLocaleString()}
+  ${chalk.gray('Cache hit rate:')}   ${chalk.green(hitRate + '%')}
+  ${chalk.gray('Cost saved:')}       ${chalk.green(formatDualCurrency(saved))}
+`);
+}
+
+// ── /cost-report ─────────────────────────────────────────────────────────────
+
+async function printCostReport(model: string): Promise<void> {
+  const [today, month] = await Promise.all([
+    getTodayUsage(),
+    getMonthUsage(),
+  ]);
+
+  const pricing = PRICING[model] ?? PRICING['deepseek-v4-flash'];
+
+  function formatStats(label: string, stats: { inputTokens: number; outputTokens: number; cacheHitTokens: number; cost: number }): string {
+    const totalTokens = stats.inputTokens + stats.outputTokens;
+    const inputCost = (stats.inputTokens / 1_000_000) * pricing.prompt;
+    const outputCost = (stats.outputTokens / 1_000_000) * pricing.completion;
+    const cacheSavings = (stats.cacheHitTokens / 1_000_000) * (pricing.prompt - pricing.cacheHit);
+    const netCost = inputCost + outputCost - cacheSavings;
+
+    return `${chalk.bold(label)}
+  ${chalk.gray('Input tokens:')}   ${stats.inputTokens.toLocaleString()}
+  ${chalk.gray('Output tokens:')}  ${stats.outputTokens.toLocaleString()}
+  ${chalk.gray('Cache hits:')}     ${stats.cacheHitTokens.toLocaleString()}
+  ${chalk.gray('Total tokens:')}   ${totalTokens.toLocaleString()}
+  ${chalk.gray('Gross cost:')}     ${formatDualCurrency(inputCost + outputCost)}
+  ${chalk.gray('Cache saved:')}    ${chalk.green(formatDualCurrency(cacheSavings))}
+  ${chalk.gray('Net cost:')}       ${formatDualCurrency(netCost)}`;
+  }
+
+  console.log(`
+${chalk.bold('Cost Report')}
+  ${chalk.gray('Model:')} ${chalk.cyan(model)}
+`);
+
+  console.log(formatStats('📆 Today', today));
+  console.log();
+  console.log(formatStats('📅 This Month', month));
+  console.log();
 }
 
 // ── /status ──────────────────────────────────────────────────────────────────
@@ -1218,27 +1308,30 @@ async function handleMcp(rest: string[]): Promise<void> {
 
 // ── /index ────────────────────────────────────────────────────────────────────
 
-async function handleIndex(cwd: string): Promise<void> {
+async function handleIndex(cwd: string, args: string): Promise<void> {
+  const semantic = args.includes('--semantic') || args.includes('-s');
   const existing = await loadIndex(cwd);
   if (existing) {
     const age = Math.round((Date.now() - new Date(existing.builtAt).getTime()) / 60000);
-    console.log(chalk.gray(`\n  Existing index: ${existing.symbols.length} symbols, ${existing.files.length} files, built ${age}m ago`));
+    const semLabel = existing.semantic ? ' [semantic]' : '';
+    console.log(chalk.gray(`\n  Existing index: ${existing.symbols.length} symbols, ${existing.files.length} files${semLabel}, built ${age}m ago`));
   }
 
   const spinnerChars = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
   let spinnerIdx = 0;
-  let spinnerMsg = 'Building index…';
+  let spinnerMsg = semantic ? 'Building index with semantic vectors…' : 'Building index…';
   const spinnerInterval = setInterval(() => {
     process.stdout.write(`\r${chalk.gray(`${spinnerChars[spinnerIdx]} ${spinnerMsg}`)}`);
     spinnerIdx = (spinnerIdx + 1) % spinnerChars.length;
   }, 80);
 
   try {
-    await buildIndex(cwd, msg => { spinnerMsg = msg; });
+    await buildIndex(cwd, { semantic, onProgress: msg => { spinnerMsg = msg; } });
     clearInterval(spinnerInterval);
     process.stdout.write('\r' + ' '.repeat(60) + '\r');
     const idx = await loadIndex(cwd);
-    console.log(chalk.green(`✓ Code index built`) + chalk.gray(` — ${idx?.symbols.length ?? 0} symbols, ${idx?.files.length ?? 0} files\n`));
+    const semInfo = idx?.semantic ? ' [semantic vectors]' : '';
+    console.log(chalk.green(`✓ Code index built${semInfo}`) + chalk.gray(` — ${idx?.symbols.length ?? 0} symbols, ${idx?.files.length ?? 0} files\n`));
   } catch (err) {
     clearInterval(spinnerInterval);
     process.stdout.write('\r' + ' '.repeat(60) + '\r');

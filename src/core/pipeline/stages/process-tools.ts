@@ -12,7 +12,7 @@ import { executeToolCall, repairToolArgs } from './process-tools-helpers.js';
 import { getLogger } from '../../observability/logger.js';
 import { getDefaultEventBus, type ToolCallEvent, type ToolResultEvent } from '../../events/bus.js';
 import { getDefaultMetrics } from '../../observability/metrics.js';
-import { createToolSpinner, type ToolSpinner } from '../../../utils/display.js';
+import { createToolSpinner, type ToolSpinner } from '../../../utils/tool-spinner.js';
 import { getHookRegistry } from '../../hooks/registry.js';
 import { runDiagnostics, formatDiagnostics } from '../../lsp/checker.js';
 

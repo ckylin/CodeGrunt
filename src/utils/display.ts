@@ -4,73 +4,15 @@ import { ACCENT } from './constants.js';
 
 const blue  = (s: string) => chalk.hex(ACCENT)(s);
 const muted = chalk.gray;
-const successColor = chalk.green;
 const danger  = chalk.red;
 const warning = chalk.yellow;
 
-// ── Tool argument extraction ────────────────────────────────────────────
+// ── Tool spinner re-export ──────────────────────────────────────────────
+// ToolSpinner lives in tool-spinner.ts so pipeline stages don't need to pull
+// in all the P/G/E display helpers just to get a spinner.
+export { createToolSpinner, type ToolSpinner } from './tool-spinner.js';
 
-function extractToolKey(args: Record<string, unknown>): { key: string; val: string } {
-  const KEY_PRIORITY = ['path', 'command', 'pattern', 'query', 'file_path'];
-  const key = KEY_PRIORITY.find(k => k in args) ?? Object.keys(args)[0] ?? '';
-  const val = key
-    ? (typeof args[key] === 'string' && (args[key] as string).length > 60
-        ? (args[key] as string).slice(0, 60) + '…'
-        : String(args[key]))
-    : '';
-  return { key, val };
-}
-
-// ── Tool execution spinner ──────────────────────────────────────────────
-
-const SPINNER_FRAMES = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
-
-export interface ToolSpinner {
-  done(ok: boolean, durationMs: number, errorMsg?: string): void;
-}
-
-/**
- * Create an in-progress spinner for a tool call. Writes a single line like
- * "  ⠋ read_file  src/x.ts  3s" and updates the spinner frame + elapsed time
- * in-place using \r until done() is called.
- */
-export function createToolSpinner(name: string, args: Record<string, unknown>): ToolSpinner {
-  const { val } = extractToolKey(args);
-  const label = muted(name) + (val ? '  ' + chalk.white(val) : '');
-  const isTTY = process.stdout.isTTY;
-  const startTime = Date.now();
-  let frameIdx = 0;
-  let active = true;
-
-  if (isTTY) {
-    process.stdout.write('\r  ' + muted(SPINNER_FRAMES[frameIdx]) + ' ' + label);
-  }
-
-  const interval = isTTY ? setInterval(() => {
-    if (!active) return;
-    frameIdx = (frameIdx + 1) % SPINNER_FRAMES.length;
-    const f = SPINNER_FRAMES[frameIdx];
-    const elapsed = Math.floor((Date.now() - startTime) / 1000);
-    const elapsedStr = elapsed > 0 ? muted(` ${elapsed}s`) : '';
-    process.stdout.write('\r  ' + muted(f) + ' ' + label + elapsedStr);
-  }, 80) : null;
-
-  return {
-    done(ok: boolean, durationMs: number, errorMsg?: string): void {
-      active = false;
-      if (interval) clearInterval(interval);
-      const icon = ok ? successColor('✓') : danger('✗');
-      const durationStr = muted(` (${durationMs}ms)`);
-      const prefix = isTTY ? '\r' : '';
-      if (ok) {
-        process.stdout.write(prefix + '  ' + icon + ' ' + label + durationStr + '\n');
-      } else {
-        const errShort = (errorMsg ?? '').slice(0, 80);
-        process.stdout.write(prefix + '  ' + icon + ' ' + label + durationStr + '  ' + danger(errShort) + '\n');
-      }
-    },
-  };
-}
+// ── CLI Display Helpers ─────────────────────────────────────────────────
 
 export function printAssistantHeader(): void {
   // Silent by default — the separator line is visual noise.
