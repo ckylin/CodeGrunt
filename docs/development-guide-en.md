@@ -16,6 +16,7 @@
 - [Adding a New LLM Provider](#adding-a-new-llm-provider)
 - [Adding a New Tool](#adding-a-new-tool)
 - [Configuration System](#configuration-system)
+- [Hook System](#hook-system)
 - [Release Process](#release-process)
 - [Troubleshooting](#troubleshooting)
 
@@ -108,7 +109,8 @@ codegrunt/
 │   │   │   ├── loop.ts       # Agent loop — P/G/E orchestration entry
 │   │   │   ├── intentor.ts   # Intent classifier (coding vs chat + skill matching)
 │   │   │   ├── planner.ts    # Task planner (decomposes into multi-step plan)
-│   │   │   └── evaluator.ts  # Quality evaluator (output check + auto-refine)
+│   │   │   ├── evaluator.ts  # Quality evaluator (output check + auto-refine)
+│   │   │   └── subagent.ts   # Read-only sub-agent execution engine
 │   │   ├── pipeline/         # Harness-style pipeline engine
 │   │   │   ├── engine.ts     # PipelineEngine: stage executor
 │   │   │   ├── types.ts      # Pipeline context, stage interfaces, P/G/E types
@@ -120,26 +122,48 @@ codegrunt/
 │   │   │       └── post-process.ts      # Post-process: blind-write warnings, token stats
 │   │   ├── tools/
 │   │   │   ├── registry.ts   # Plugin-style ToolRegistry (runtime register/remove)
-│   │   │   ├── executor.ts   # Tool execution (diff confirm, param validation)
 │   │   │   ├── read_file.ts
 │   │   │   ├── write_file.ts
 │   │   │   ├── edit_file.ts
 │   │   │   ├── execute_shell.ts
 │   │   │   ├── list_directory.ts
-│   │   │   └── search_files.ts
+│   │   │   ├── search_files.ts
+│   │   │   ├── memory.ts     # memory_write / memory_read tools
+│   │   │   ├── web_search.ts # Web search tool
+│   │   │   ├── code_search.ts # Code symbol search tool
+│   │   │   └── agent_open.ts # Sub-agent delegation tool
 │   │   ├── context/
 │   │   │   ├── manager.ts    # Context window management (token budget, trimming)
+│   │   │   ├── compact.ts    # Hierarchical chunk-based conversation compaction
 │   │   │   └── project-guide.ts  # Load CODEGRUNT.md / CLAUDE.md project guides
+│   │   ├── memory/
+│   │   │   ├── store.ts      # Persistent memory store (JSONL files)
+│   │   │   └── habits.ts     # User behavior habit learning
+│   │   ├── index/
+│   │   │   └── index.ts      # Code symbol index build and search
+│   │   ├── permissions/
+│   │   │   └── index.ts      # Workspace-level tool permission overrides
+│   │   ├── snapshot/
+│   │   │   └── index.ts      # Side-git auto snapshots
+│   │   ├── hooks/
+│   │   │   └── registry.ts   # User-defined hook script system
+│   │   ├── lsp/
+│   │   │   └── checker.ts    # Language diagnostics (TS/Python/Go/Rust/ESLint)
+│   │   ├── mcp/
+│   │   │   ├── config.ts     # MCP server config persistence
+│   │   │   ├── manager.ts    # MCP client connection management
+│   │   │   └── types.ts      # MCP type definitions
+│   │   ├── session/
+│   │   │   └── store.ts      # Session state persistence
 │   │   ├── events/
-│   │   │   └── bus.ts        # Typed EventBus (pipeline/tool/LLM lifecycle events)
+│   │   │   └── bus.ts        # Typed EventBus
 │   │   ├── observability/
 │   │   │   ├── logger.ts     # Logger v2: file transport + trace IDs + log rotation
 │   │   │   └── metrics.ts    # Lightweight Metrics (counters, timers, snapshots)
-│   │   └── di/
-│   │       └── container.ts  # Service container/DI (singleton, transient, lifecycle)
+│   │   └── usage.ts          # Session/per-call token usage tracking
 │   ├── providers/
 │   │   └── deepseek/
-│   │       ├── provider.ts   # DeepSeek LLM provider implementation
+│   │       ├── provider.ts   # DeepSeek LLM provider implementation (exponential backoff retry)
 │   │       └── client.ts     # OpenAI-compatible client factory + API key validation
 │   ├── utils/
 │   │   ├── display.ts        # Terminal output formatting (plan, step, evaluation)
@@ -148,6 +172,7 @@ codegrunt/
 │   │   ├── markdown.ts       # Streaming Markdown-to-terminal renderer
 │   │   ├── interrupt.ts      # SIGINT handling
 │   │   ├── select.ts         # Interactive list selector (arrow-key navigation)
+│   │   ├── locale.ts         # System language detection
 │   │   └── constants.ts      # Shared constants
 │   ├── config.ts             # Configuration loading (env vars, config file)
 │   └── types.ts              # Shared TypeScript types and interfaces
@@ -155,7 +180,17 @@ codegrunt/
 │   ├── tools/
 │   │   ├── read_file.test.ts
 │   │   ├── write_file.test.ts
+│   │   ├── edit_file.test.ts
 │   │   └── execute_shell.test.ts
+│   ├── agent/
+│   │   ├── intentor_planner.test.ts
+│   │   └── subagent.test.ts
+│   ├── context/
+│   │   └── context_manager.test.ts
+│   ├── pipeline/
+│   │   └── engine.test.ts
+│   └── manual/
+│       └── input-test.ts
 ├── docs/                     # Documentation
 ├── dist/                     # Compiled output (gitignored)
 ├── package.json
@@ -261,9 +296,12 @@ npx vitest                        # Watch mode
 npx vitest run tests/tools/read_file.test.ts
 npx vitest run tests/tools/write_file.test.ts
 npx vitest run tests/tools/execute_shell.test.ts
+npx vitest run tests/tools/edit_file.test.ts
+npx vitest run tests/agent/intentor_planner.test.ts
+npx vitest run tests/agent/subagent.test.ts
+npx vitest run tests/context/context_manager.test.ts
+npx vitest run tests/pipeline/engine.test.ts
 ```
-
-> **Note:** Currently only 3 of the 6 tools have test files. Tests for `edit_file`, `list_directory`, and `search_files` are not yet implemented. Contributions adding these tests are welcome!
 
 ### Test Structure
 
@@ -286,7 +324,7 @@ User Input (CLI / REPL)
        │
        ▼
   ┌──────────────┐
-  │   Intentor   │  Intent classification: Skill match / Coding → P/G/E / Chat → direct gen
+  │   Intentor   │  Intent classification: Skill match / Coding / Chat
   └──────┬───────┘
          │
     ┌────▼─────────────────────────────────────┐
@@ -301,9 +339,14 @@ User Input (CLI / REPL)
     └───────────────┘
          │
     ┌────▼────┐
-    │  Tools  │  6 built-in + plugin registry
-    │ (6+)    │
+    │  Tools  │  11 built-in + MCP extensions
+    │ (11+)   │
     └─────────┘
+         │
+    ┌────▼──────────────┐
+    │  Habits/Memory     │  Auto-learn user preferences & persist
+    │  Snapshots/Diag    │  Safety net: auto-snapshots + post-edit diagnostics
+    └───────────────────┘
 ```
 
 ### Agent Loop (`src/core/agent/loop.ts`)
@@ -311,7 +354,7 @@ User Input (CLI / REPL)
 The agent loop uses a **P/G/E (Planner / Generator / Evaluator) + Intentor** architecture:
 
 **Phase 0 — Intentor**: Classifies the task into three paths:
-- **Skill match** → `runSkillFlow`: Applies skill system prompt + content, then chat-style generation
+- **Skill match** → `runSkillFlow`: Applies skill system prompt + content; supports subagent mode (read-only execution)
 - **Coding** → `runCodingFlow`: P/G/E pipeline with plan → execute → evaluate → refine
 - **Chat** → `runChatFlow`: Direct generator pipeline, skipping Planner/Evaluator
 
@@ -323,39 +366,45 @@ Intentor uses fast heuristics first:
 LLM-based classification only fires when heuristics are ambiguous, saving latency and cost.
 
 **Coding Flow — P/G/E Pipeline**:
-1. **Planner**: Decomposes complex tasks into 2-5 independently verifiable steps, using low-temperature (0.1) structured JSON output. Skipped for short tasks (≤50 chars) and continuation signals
+1. **Planner**: Decomposes complex tasks into 2-5 independently verifiable steps, using low-temperature (0.1) structured JSON output. Injects real tool list into prompt, filters invalid `toolsHint` values. Skipped for short tasks (≤50 chars) and continuation signals
 2. **Generator**: Pipeline engine executes each step sequentially → prepare context → stream LLM call → tool execution → post-process. Now supports **inner iteration** — multi-turn tool call loops within a single step
-3. **Evaluator**: Checks output quality / plan adherence / hallucinations. If it fails, injects feedback and retries (max 3x, up from 2x). `pruneRefineMessages()` cleans evaluation feedback messages between steps
+3. **Evaluator**: Checks output quality / plan adherence / hallucinations across **14 error patterns**. If it fails, injects feedback and retries (max 3x). After 3 failed retries, prompts user whether to continue. `pruneRefineMessages()` cleans evaluation feedback between steps. Auto-runs `tsc --noEmit` after write/edit on TypeScript projects
 4. `sessionHasRead` tracking prevents redundant file reads across turns
 
-**Chat Flow**: Skips Planner/Evaluator, uses Generator pipeline iteratively until model stops (up to 30 iterations). Prints fallback text "(no text response from model)" if model returns empty.
+**Chat Flow**: Skips Planner/Evaluator, uses Generator pipeline iteratively until model stops (up to 30 iterations). Prints fallback text if model returns empty.
 
-**Skill Flow**: Applies skill system prompt + content, then uses tool-call iteration loop like chat flow.
+**Skill Flow**: Applies skill system prompt + content, then uses tool-call iteration loop. Supports subagent mode (`mode: 'subagent'`) which runs in an isolated, read-only context.
 
 Key design decisions:
 
-- **System prompt stability**: Built once per session, never changes. Maximizes DeepSeek prompt cache hit rates.
+- **System prompt stability**: Built once per session, never changes. Maximizes DeepSeek prompt cache hit rates. For R1 reasoner models, the system prompt is embedded in the first user message
 - **Pipeline architecture**: Inspired by Harness CI/CD, 5 independently testable stages sharing a `PipelineContext`
 - **EventBus**: All lifecycle events (pipeline start/complete, tool calls, LLM usage) published via typed EventBus
-- **DI Container**: Services registered/resolved via `ServiceContainer`, supporting singleton and transient lifecycles
 - **Streaming-first**: All LLM communication via `AsyncIterable<StreamChunk>` for real-time terminal output
+- **Sub-agents**: `agent_open` tool delegates read-only research tasks, restricted to non-destructive tools
+- **Model branching**: `isReasonerModel()` detects R1 variants; `supportsReasoning()` matches models emitting `reasoning_content`. `reasoning_content` only sent for last assistant message to reduce token cost
 
 ### Tool System
 
 Tools are how the LLM interacts with the user's environment. Each tool implements the `Tool` interface and is registered via the plugin-style `ToolRegistry` (supports runtime dynamic add/remove).
 
-Six built-in tools:
+11 built-in tools:
 
-| Tool | Description |
-|---|---|
-| `read_file` | Read file contents (truncated at 30,000 chars) |
-| `write_file` | Write content to a file (creates directories) |
-| `edit_file` | Replace exact string in a file (string-match editing) |
-| `execute_shell` | Run shell commands with timeout |
-| `list_directory` | List directory tree with configurable depth |
-| `search_files` | Search for text patterns in files |
+| Tool | Description | Destructive? |
+|---|---|---|
+| `read_file` | Read file contents (line range support, 100KB limit) | No |
+| `write_file` | Write content to a file (creates directories) | **Yes** |
+| `edit_file` | Replace exact string in a file (string-match editing) | **Yes** |
+| `execute_shell` | Run shell commands with timeout (max 5 min) | **Yes** |
+| `list_directory` | List directory tree (default 500, max 2000 entries) | No |
+| `search_files` | Search for text patterns (supports regex + hidden files) | No |
+| `memory_write` | Write a persistent memory entry | No |
+| `memory_read` | Read persistent memory entries | No |
+| `web_search` | Web search (Mojeek/SearXNG/DuckDuckGo) | No |
+| `code_search` | Code symbol search (requires `/index` first) | No |
+| `agent_open` | Delegate research task to read-only sub-agent | No |
 
-**Safety**: Before destructive operations, the executor shows a diff preview and asks for user confirmation with three options: Yes, Yes for all (session), No.
+**Safety**: Before destructive operations, the executor shows a diff preview and asks for user confirmation with three options: Yes, Yes for all (session), No. Workspace-level permission files (`.codegrunt/permissions.json`) can override per-tool behavior (allow/deny/ask), managed in `process-tools-helpers.ts`.
 
 ### Pipeline Engine (`src/core/pipeline/`)
 
@@ -364,7 +413,7 @@ Inspired by Harness CI/CD pipelines, each agent interaction is decomposed into 5
 | Stage | File | Responsibility |
 |---|---|---|
 | PrepareContext | `prepare-context.ts` | Build system prompt, inject project guide, init messages |
-| StreamResponse | `stream-response.ts` | Stream LLM call, accumulate text/reasoning/tool calls |
+| StreamResponse | `stream-response.ts` | Stream LLM call, accumulate text/reasoning/tool calls; forwards real cache hit/miss tokens |
 | ProcessToolCalls | `process-tools.ts` | Parse tool calls, execute via executor, inject results |
 | ProcessToolHelpers | `process-tools-helpers.ts` | yes-for-all session-level state management |
 | PostProcess | `post-process.ts` | Blind-write detection, token stats, final output formatting |
@@ -377,7 +426,8 @@ The `ContextManager` maintains the conversation history:
 
 - **Token estimation**: Uses a simple 4:1 character-to-token ratio.
 - **Trimming**: When the estimated token count exceeds the budget, oldest non-system messages are removed.
-- **Budget**: Defaults to 90,000 tokens for chat models; 100,000 for reasoner models (1M context window).
+- **Budget**: Defaults to 90,000 tokens for chat models; 100,000 for reasoner models.
+- **Auto-compaction** (`compact.ts`): Triggers at 50% token budget or when non-system messages exceed 30. Keeps 15 most recent messages, summary up to 1500 tokens. Uses hierarchical chunk-based compaction for large histories.
 
 ### Provider System
 
@@ -387,6 +437,80 @@ All LLM backends implement the `LLMProvider` interface. The `StreamChunk` union 
 - `reasoning_delta` — chain-of-thought reasoning (displayed as "Thinking...")
 - `tool_call_delta` — streaming tool call arguments
 - `finish` — end-of-stream with finish reason
+
+DeepSeek provider features:
+- Exponential backoff retry: up to 3 retries on 429, 5xx, or `ECONNRESET` (1s → 2s → 4s)
+- Streaming tool call argument accumulation
+- Token usage tracking
+
+### Sub-agent System (`src/core/agent/subagent.ts`)
+
+The `agent_open` tool delegates focused research tasks to a read-only sub-agent:
+
+- **Read-only tool set**: Restricted to `read_file`, `search_files`, `list_directory`, `code_search`, `web_search`, `memory_read`. No `write_file`/`edit_file`/`execute_shell`
+- **Isolated context**: Sub-agents get a fresh `Message[]` array — they never see the calling agent's conversation history
+- **Model downgrade**: Always downgraded to `deepseek-v4-flash` (same policy as Intentor classification calls)
+- **Synchronous execution**: Currently one-at-a-time, blocks until final answer or max iterations (10)
+
+### Memory System (`src/core/memory/`)
+
+- **Persistent Memory Store** (`store.ts`): Uses JSONL files stored at `~/.codegrunt/memory/entries.jsonl`. Supports write, read, delete, and filter by type (user/feedback/project/reference). Also supports session summary storage per working directory
+- **Habit Learning** (`habits.ts`): Automatically analyzes user language preference (Chinese/English), verbosity preference (terse/detailed), tool confirmation behavior (yes-all/careful reviewer), and task style preference (coding/Q&A). Persists learned results as memory entries once statistical thresholds are reached
+
+### Code Symbol Index (`src/core/index/index.ts`)
+
+Built via the `/index` command:
+
+- No external dependencies, no embedding model
+- Uses `git ls-files` or directory walk to collect source files
+- Extracts functions/classes/interfaces/types/exports via grep patterns
+- Supports TypeScript, JavaScript, Python, Go, Rust
+- Index stored at `~/.codegrunt/index/<hash>/index.json`
+- `code_search` tool uses this index for fast symbol lookup
+
+### Workspace Permissions (`src/core/permissions/index.ts`)
+
+`.codegrunt/permissions.json` provides tool-level permission overrides:
+
+- `allow` — skip confirmation prompts
+- `deny` — hard block, tool call fails immediately
+- `ask` — always prompt for confirmation (even in auto mode / yes-for-all)
+
+### Auto-snapshots (`src/core/snapshot/index.ts`)
+
+Creates side-git snapshots after every coding turn:
+
+- Uses separate git directory (`.codegrunt/git`), never touches the user's `.git`
+- Snapshots stored on a "snapshots" branch
+- Viewable and restorable via `/restore` command
+
+### Hook System (`src/core/hooks/registry.ts`)
+
+Supports user-defined hook scripts placed in `~/.codegrunt/hooks/`:
+
+- Four trigger points: `user-prompt-submit`, `pre-tool-use`, `post-tool-use`, `stop`
+- Supports Shell scripts (.sh/.bash) and JS scripts (.js/.mjs/.cjs)
+- Scripts receive JSON event on stdin, return `continue`/`block`/`modify` response
+- Timeout (10s) or non-zero exit treated as `continue` — hooks must not crash the agent
+
+### Language Diagnostics (`src/core/lsp/checker.ts`)
+
+Auto-runs language diagnostics after file edits:
+
+- TypeScript: `tsc --noEmit --skipLibCheck`
+- Python: `pyright` (projects with pyproject.toml/setup.py)
+- Go: `go vet` (projects with go.mod)
+- Rust: `cargo check` (projects with Cargo.toml)
+- ESLint: `eslint` (projects with ESLint config)
+- Results formatted and injected into agent context
+
+### MCP Integration (`src/core/mcp/`)
+
+Supports Model Context Protocol servers:
+
+- Supports stdio and SSE transports
+- MCP server config stored at `~/.codegrunt/mcp.json`
+- MCP tools automatically wrapped as CodeGrunt tools and registered in ToolRegistry
 
 ### Observability
 
@@ -398,6 +522,7 @@ All LLM backends implement the `LLMProvider` interface. The `StreamChunk` union 
   - Errors auto-published to EventBus
 - **Metrics** (`observability/metrics.ts`): Counters/timers/snapshots with telemetry summary output
 - **EventBus** (`events/bus.ts`): Typed event bus covering all lifecycle events (pipeline, tools, LLM, conversation)
+- **Usage tracking** (`usage.ts`): Shared token usage module (`addUsage`, `getSessionUsage`, `getLastCallUsage`), extracted from `loop.ts` to avoid circular imports
 
 ### Ink/React Terminal UI (`src/cli/ink/`)
 
@@ -506,7 +631,7 @@ export const myTool: Tool = {
 
 ### Step 2: Register the Tool
 
-Add to `src/core/tools/registry.ts` in the `ToolRegistry.registerBuiltins()` method:
+Add to `src/core/tools/registry.ts` in the `registerBuiltins()` method:
 
 ```typescript
 import { myTool } from './my_tool.js';
@@ -515,7 +640,7 @@ import { myTool } from './my_tool.js';
 
 ### Step 3: Add Safety Confirmation (if destructive)
 
-Add confirmation logic in `src/core/tools/executor.ts` (follow the `edit_file`/`write_file` pattern).
+Destructive tools need to implement diff preview and confirmation flow. The confirmation logic is in `process-tools-helpers.ts` (the `executeToolCall` function). Results are injected into the message history after confirmation.
 
 ### Step 4: Write Tests
 
@@ -543,14 +668,17 @@ CodeGrunt provides a set of slash commands available in the interactive REPL, im
 | `/help` | Show available commands and current configuration |
 | `/model <name>` | Switch the active LLM model (interactive if no name) |
 | `/init` | Analyze the codebase and generate a CODEGRUNT.md project guide |
+| `/index` | Build code symbol index for faster code_search tool |
 | `/clear` | Clear the conversation history |
-| `/compact` | Summarize and compress conversation history to save tokens |
+| `/compact` | Summarize and compress conversation history to save tokens (hierarchical chunk-based) |
 | `/review` | Review session changes for logic issues |
-| `/cost` | Show token usage and estimated cost for the session |
+| `/cost` | Show token usage and estimated cost for the session (with cache hit/miss stats) |
 | `/balance` | Show account balance and usage (today / this month) |
 | `/config` | Show or change configuration settings |
 | `/reasoning` / `/effort` | Set reasoning effort for R1 models (low/medium/high) |
-| `/skills` | List and manage skills (create, list) |
+| `/skills` | List and manage skills (create, list, install) |
+| `/search-engine` | Switch the web search engine |
+| `/restore` | Restore workspace from an auto-snapshot |
 
 ---
 
@@ -570,6 +698,8 @@ codegrunt "compare @src/config.ts and @src/types.ts"
 ```bash
 codegrunt "summarize @https://example.com/docs/api"
 ```
+
+The resolver skips `node_modules`, `.git`, `dist`, `.next`, `__pycache__`, `.cache` during directory scans.
 
 ---
 
@@ -597,6 +727,8 @@ CodeGrunt's config loading chain (highest to lowest priority):
 | Log Level | `CODEGRUNT_LOG_LEVEL` | `info` |
 | File Logging | `CODEGRUNT_LOG_FILE` | enabled |
 | Verbose | `CODEGRUNT_VERBOSE` | disabled |
+| Search Engine | `CODEGRUNT_SEARCH_ENGINE` | `mojeek` |
+| SearXNG URL | `CODEGRUNT_SEARXNG_URL` | — |
 
 ### Model Detection (`src/config.ts`)
 
@@ -604,6 +736,35 @@ CodeGrunt's config loading chain (highest to lowest priority):
 - `supportsReasoning(model)`: Detects reasoning_content support (R1 models + V4 Pro)
 - Reasoner models: larger context budget (`CONTEXT_BUDGET = 100_000`), no temperature support
 - Chat models: standard budget (`CHAT_CONTEXT_BUDGET = 90_000`), full parameter support
+
+---
+
+## Hook System
+
+### Directory Structure
+
+User hook scripts are placed in `~/.codegrunt/hooks/`.
+
+### Event Types
+
+| Event Name | Trigger | Script Naming |
+|---|---|---|
+| `user-prompt-submit` | After user submits a prompt | `user-prompt-submit.*` |
+| `pre-tool-use` | Before tool execution | `pre-tool-use.*` |
+| `post-tool-use` | After tool execution | `post-tool-use.*` |
+| `stop` | When session stops | `stop.*` |
+
+### Script Format
+
+Scripts receive JSON event on stdin, must return JSON response on stdout:
+
+```json
+{ "action": "continue" }
+{ "action": "block", "reason": "..." }
+{ "action": "modify", "data": { ... } }
+```
+
+Supported languages: Shell (.sh, .bash) and JavaScript (.js, .mjs, .cjs).
 
 ---
 
