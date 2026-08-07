@@ -3,21 +3,15 @@ import { resolve, dirname, basename, isAbsolute } from 'path';
 import { homedir } from 'os';
 import type { Skill } from '../skills.js';
 import type { DropdownItem } from './types.js';
+import { BUILTIN_COMMANDS } from '../commands.js';
 
 const SKIP_DIRS = new Set(['node_modules', '.git', 'dist', '.next', '__pycache__', 'coverage']);
 
-export const SLASH_COMMANDS = [
-  { name: '/init',    desc: 'Analyze codebase and generate CODEGRUNT.md' },
-  { name: '/model',   desc: 'Switch model' },
-  { name: '/config',  desc: 'View or change config (temperature, reasoning, etc.)' },
-  { name: '/skills',  desc: 'List and manage skills' },
-  { name: '/compact', desc: 'Compress conversation history' },
-  { name: '/review',  desc: 'Review session changes for logic issues' },
-  { name: '/clear',   desc: 'Clear conversation context' },
-  { name: '/balance', desc: 'Show account balance & usage' },
-  { name: '/cost',    desc: 'Show session token usage and cost' },
-  { name: '/help',    desc: 'Show help' },
-];
+// Derived from BUILTIN_COMMANDS (the canonical command list in commands.ts)
+// rather than a separate hardcoded array — otherwise new slash commands
+// registered there (e.g. /branch, /cache) silently never show up in the
+// autocomplete dropdown.
+export const SLASH_COMMANDS = BUILTIN_COMMANDS.map(c => ({ name: '/' + c.name, desc: c.desc }));
 
 export function listFilesSync(partial: string, cwd: string): string[] {
   try {
@@ -38,7 +32,8 @@ export function listFilesSync(partial: string, cwd: string): string[] {
       listDir = endsWithSlash ? expanded : (dirname(expanded) || expanded);
       prefix  = endsWithSlash ? '' : basename(expanded);
       const origDir = endsWithSlash ? norm : dirname(norm);
-      displayBase = origDir === '.' ? '' : origDir + '/';
+      // Avoid double slash when origDir already ends with '/' (e.g. @/$Recycle.Bin/)
+      displayBase = origDir === '.' ? '' : (origDir.endsWith('/') ? origDir : origDir + '/');
     } else if (hasDir) {
       listDir = resolve(cwd, endsWithSlash ? expanded : dirname(expanded));
       prefix  = endsWithSlash ? '' : basename(expanded);
@@ -59,8 +54,28 @@ export function listFilesSync(partial: string, cwd: string): string[] {
   }
 }
 
+export interface AtTokenMatch {
+  token: string; // e.g. "@src/fo" — includes the leading '@'
+  start: number; // index into the input string where the token begins
+  end: number;   // index just past the token (next whitespace or end of string)
+}
+
+// Finds the whitespace-delimited word containing the cursor and returns it
+// if it starts with '@'. Lets '@' file references work anywhere in the
+// message (not just at input start), and lets multiple '@' tokens coexist.
+export function findAtTokenAtCursor(input: string, cursor: number): AtTokenMatch | null {
+  let start = cursor;
+  while (start > 0 && !/\s/.test(input[start - 1] ?? '')) start--;
+  let end = cursor;
+  while (end < input.length && !/\s/.test(input[end] ?? '')) end++;
+  const token = input.slice(start, end);
+  if (!token.startsWith('@')) return null;
+  return { token, start, end };
+}
+
 export function getAutocompleteItems(
   input: string,
+  cursor: number,
   cwd: string,
   skills: Skill[],
 ): DropdownItem[] {
@@ -79,8 +94,9 @@ export function getAutocompleteItems(
     return [...builtins, ...skillItems];
   }
 
-  if (input.startsWith('@')) {
-    const partial = input.slice(1);
+  const atMatch = findAtTokenAtCursor(input, cursor);
+  if (atMatch) {
+    const partial = atMatch.token.slice(1);
     return listFilesSync(partial, cwd)
       .slice(0, 8)
       .map(f => ({ value: '@' + f, label: '@' + f, kind: 'file' as const }));

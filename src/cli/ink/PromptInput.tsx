@@ -6,7 +6,7 @@ import { join } from 'path';
 import { ACCENT } from '../../utils/constants.js';
 import { Dropdown } from './Dropdown.js';
 import { createHistoryController, saveHistoryEntry } from './useHistory.js';
-import { getAutocompleteItems } from './useAutocomplete.js';
+import { getAutocompleteItems, findAtTokenAtCursor } from './useAutocomplete.js';
 import type { PromptInputProps } from './types.js';
 
 function detectContextFile(cwd: string): string | null {
@@ -28,6 +28,11 @@ export function PromptInput({
   const [cursor, setCursor] = useState(0);
   const [dropdownIndex, setDropdownIndex] = useState(0);
   const [exitHint, setExitHint] = useState(false);
+  // True right after recalling a history entry — suppresses the dropdown so
+  // that a recalled "/foo" or "@bar" line doesn't hijack the next up/down
+  // press (which the user expects to keep navigating history, not a menu).
+  // Cleared as soon as the user actively edits the text again.
+  const [suppressDropdown, setSuppressDropdown] = useState(false);
   const historyCtrl = useRef(createHistoryController());
   // Refs mirror state so useInput callbacks always read the latest values.
   // Updated synchronously in the handler (not via useEffect) so rapid keypresses
@@ -35,6 +40,7 @@ export function PromptInput({
   const inputRef = useRef('');
   const cursorRef = useRef(0);
   const lastCtrlCRef = useRef(0);
+  const suppressDropdownRef = useRef(false);
 
   const apply = (nextInput: string, nextCursor: number) => {
     inputRef.current = nextInput;
@@ -43,17 +49,43 @@ export function PromptInput({
     setCursor(nextCursor);
   };
 
-  const dropdownItems = getAutocompleteItems(input, cwd, skills);
+  const setSuppress = (value: boolean) => {
+    suppressDropdownRef.current = value;
+    setSuppressDropdown(value);
+  };
+
+  const dropdownItems = suppressDropdown ? [] : getAutocompleteItems(input, cursor, cwd, skills);
   const dropdownVisible = dropdownItems.length > 0;
 
   // Reset dropdown selection when items change
   useEffect(() => {
     setDropdownIndex(0);
-  }, [input]);
+  }, [input, cursor]);
+
+  // For '@' file completions, replace only the @token under the cursor
+  // (not the whole line) so multiple @-references can coexist. Slash
+  // commands/skills still replace the whole input, as before.
+  const acceptSelection = (selected: { value: string; kind?: 'builtin' | 'skill' | 'file' }) => {
+    if (selected.kind === 'file') {
+      const match = findAtTokenAtCursor(inputRef.current, cursorRef.current);
+      if (match) {
+        const next = inputRef.current.slice(0, match.start) + selected.value + inputRef.current.slice(match.end);
+        apply(next, match.start + selected.value.length);
+        return;
+      }
+    }
+    apply(selected.value, selected.value.length);
+  };
 
   useInput((char, key) => {
     const cur = cursorRef.current;
     const inp = inputRef.current;
+
+    // Any key other than up/down means the user is actively editing again —
+    // stop suppressing the dropdown so '@'/'/' autocomplete works normally.
+    if (suppressDropdownRef.current && !key.upArrow && !key.downArrow) {
+      setSuppress(false);
+    }
 
     // Ctrl+C → double-press within 2s to exit
     if (key.ctrl && char === 'c') {
@@ -85,22 +117,26 @@ export function PromptInput({
 
     // Arrow up
     if (key.upArrow) {
-      if (dropdownVisible) {
+      if (dropdownVisible && !suppressDropdownRef.current) {
         setDropdownIndex(i => Math.max(0, i - 1));
       } else {
         const prev = historyCtrl.current.navigateUp(inp);
         apply(prev, prev.length);
+        // Recalled text may itself start with '/' or contain '@' — don't let
+        // it pop the dropdown and steal the next up/down press.
+        setSuppress(true);
       }
       return;
     }
 
     // Arrow down
     if (key.downArrow) {
-      if (dropdownVisible) {
+      if (dropdownVisible && !suppressDropdownRef.current) {
         setDropdownIndex(i => Math.min(dropdownItems.length - 1, i + 1));
       } else {
         const next = historyCtrl.current.navigateDown();
         apply(next, next.length);
+        setSuppress(true);
       }
       return;
     }
@@ -109,7 +145,7 @@ export function PromptInput({
     if (key.tab) {
       if (dropdownVisible) {
         const selected = dropdownItems[dropdownIndex];
-        if (selected) apply(selected.value, selected.value.length);
+        if (selected) acceptSelection(selected);
       }
       return;
     }
@@ -131,7 +167,7 @@ export function PromptInput({
             saveHistoryEntry(trimmed);
             onSubmit({ text: trimmed, cancelled: false });
           } else {
-            apply(selected.value, selected.value.length);
+            acceptSelection(selected);
           }
         }
         return;
