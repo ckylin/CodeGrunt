@@ -4,8 +4,9 @@ import { homedir } from 'os';
 import { join } from 'path';
 import chalk from 'chalk';
 import type { CodeGruntConfig } from '../types.js';
-import { selectFromList } from './input.js';
+import { selectFromList } from '../utils/select.js';
 import { validateApiKey } from '../providers/deepseek/client.js';
+import { saveConfig } from '../config.js';
 
 const CONFIG_DIR = join(homedir(), '.codegrunt');
 const CONFIG_PATH = join(CONFIG_DIR, 'config.json');
@@ -82,27 +83,9 @@ export async function runSetup(existingConfig: CodeGruntConfig): Promise<CodeGru
   const config: CodeGruntConfig = { ...existingConfig, apiKey, model };
   const selected = DEEPSEEK_MODELS.find((m) => m.id === model);
 
-  await mkdir(CONFIG_DIR, { recursive: true });
-  await writeFile(
-    CONFIG_PATH,
-    JSON.stringify(
-      {
-        apiKey,
-        model,
-        baseURL: config.baseURL,
-        maxTokens: config.maxTokens,
-        temperature: config.temperature,
-        reasoningEffort: config.reasoningEffort,
-        topP: config.topP,
-        frequencyPenalty: config.frequencyPenalty,
-        presencePenalty: config.presencePenalty,
-        trustMode: config.trustMode,
-      },
-      null,
-      2,
-    ),
-    'utf-8',
-  );
+  // Delegate to the canonical saveConfig in config.ts (single source of truth
+  // for config persistence — avoids duplicate serialization logic).
+  await saveConfig(config);
 
   console.log(
     chalk.green(`\n✓ Config saved`) +

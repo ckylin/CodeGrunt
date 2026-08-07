@@ -39,7 +39,10 @@ export async function resolveAtReferences(
   const attachments: string[] = [];
 
   for (const ref of refs) {
-    expanded = expanded.replace(ref.raw, chalk.cyan(ref.raw));
+    // Use function replacer to avoid $ special-character interpretation in String.replace.
+    // When ref.raw contains "$" (e.g. C:\$Recycle.Bin\), a string replacement interprets
+    // $&, $`, $', $n as special patterns, corrupting the output.
+    expanded = expanded.replace(ref.raw, () => chalk.cyan(ref.raw));
     attachments.push(formatAttachment(ref));
   }
 

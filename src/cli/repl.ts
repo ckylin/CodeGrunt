@@ -15,6 +15,7 @@ import { loadSkills } from './skills.js';
 import { saveConfig, supportsReasoning, CONTEXT_BUDGET, CHAT_CONTEXT_BUDGET } from '../config.js';
 import { loadSessionSummary, readEntries } from '../core/memory/store.js';
 import { saveSession, listSessions, loadSession, formatSessionEntry } from '../core/session/store.js';
+import { loadBranchTree, saveBranchTree, recordCheckpoint, getCurrentBranchId } from '../core/session/branching.js';
 import { selectFromList } from '../utils/select.js';
 import { detectSystemLanguage } from '../utils/locale.js';
 import {
@@ -240,6 +241,18 @@ export async function startRepl(
           cwd,
           model: config.model,
         });
+      }
+      // Record a checkpoint for session branching (v0.7)
+      if (currentSessionId) {
+        try {
+          const tree = await loadBranchTree(currentSessionId);
+          const currentId = getCurrentBranchId(tree);
+          const branch = tree.branches[currentId];
+          const turnIdx = branch?.checkpoints.length ?? 0;
+          const nonSysCount = msgs.filter(m => m.role !== 'system').length;
+          const updatedTree = recordCheckpoint(tree, turnIdx, nonSysCount, effectiveTask);
+          await saveBranchTree(currentSessionId, updatedTree);
+        } catch { /* non-critical */ }
       }
     } catch (err) {
       if ((err as Error)?.name === 'AbortError' || interrupt.signal.aborted) {
