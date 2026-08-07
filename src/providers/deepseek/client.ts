@@ -5,6 +5,10 @@ export function createOpenAIClient(config: CodeGruntConfig): OpenAI {
   return new OpenAI({
     apiKey: config.apiKey,
     baseURL: config.baseURL,
+    // openai SDK defaults to a 10-minute timeout — too long to hang silently
+    // on a stalled stream. 3 minutes gives large-context calls room while
+    // still surfacing a clear error instead of an indefinite freeze.
+    timeout: 180_000,
   });
 }
 

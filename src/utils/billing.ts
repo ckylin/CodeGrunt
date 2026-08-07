@@ -2,6 +2,7 @@ import { readFile, writeFile, mkdir } from 'fs/promises';
 import { join } from 'path';
 import { homedir } from 'os';
 import chalk from 'chalk';
+import { PRICING, type PriceEntry, V4_FLASH_PRICE, V4_PRO_PRICE, calculateCost } from '../core/usage.js';
 
 const CONFIG_DIR = join(homedir(), '.codegrunt');
 const USAGE_PATH = join(CONFIG_DIR, 'usage.json');
@@ -97,7 +98,7 @@ export async function recordUsage(inputTokens: number, outputTokens: number, cac
   await saveUsageFile(record);
 }
 
-// ── Exchange rate: USD → CNY ( RMB ) ─────────────────────────────────────
+// ── Exchange rate: USD to CNY (RMB) ─────────────────────────────────────
 export const USD_TO_CNY = 7.25;
 
 export function formatDualCurrency(usdAmount: number): string {
@@ -105,14 +106,8 @@ export function formatDualCurrency(usdAmount: number): string {
   return `${chalk.yellow(`${usdAmount.toFixed(4)}`)} ${chalk.gray(`(¥${cnyAmount.toFixed(2)} RMB)`)}`;
 }
 
-// ── DEEPSEEK pricing (USD per 1M tokens) ──────────────────────────────────
-
-export const PRICING: Record<string, { prompt: number; completion: number; cacheHit: number }> = {
-  'deepseek-chat':     { prompt: 0.27, completion: 1.10, cacheHit: 0.07 },
-  'deepseek-v4-flash': { prompt: 0.27, completion: 1.10, cacheHit: 0.07 },
-  'deepseek-v4-pro':   { prompt: 0.27, completion: 1.10, cacheHit: 0.07 },
-  'deepseek-reasoner': { prompt: 0.55, completion: 2.19, cacheHit: 0.14 },
-};
+// ── PRICING is re-exported from core/usage.ts (single source of truth) ────
+export { PRICING, type PriceEntry, V4_FLASH_PRICE, V4_PRO_PRICE, calculateCost };
 
 // ── Query helpers ─────────────────────────────────────────────────────────
 
@@ -176,7 +171,7 @@ function stopSpinner(interval: ReturnType<typeof setInterval>): void {
 
 export async function printBalanceAndUsage(apiKey: string, baseURL: string, model: string): Promise<void> {
   // Spinner while fetching balance (network call to DeepSeek API)
-  const spinner = startSpinner('Fetching balance & usage…');
+  const spinner = startSpinner('Fetching balance & usage...');
 
   // Fetch balance in parallel with reading local usage
   const [balanceResult, todayUsage, monthUsage] = await Promise.allSettled([

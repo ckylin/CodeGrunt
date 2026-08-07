@@ -3,7 +3,7 @@ import type { LLMProvider, Message, RequestOptions, StreamChunk, ToolDefinition,
 import { createOpenAIClient } from './client.js';
 import type { CodeGruntConfig } from '../../types.js';
 import chalk from 'chalk';
-import { addUsage } from '../../core/usage.js';
+import { addUsage, PRICING as CORE_PRICING, calculateCost } from '../../core/usage.js';
 import { recordUsage } from '../../utils/billing.js';
 
 const RETRYABLE_STATUS = new Set([429, 500, 502, 503, 504]);
@@ -219,25 +219,16 @@ function toOpenAIMessage(msg: Message, includeReasoning = false): OpenAI.Chat.Ch
   } as OpenAI.Chat.ChatCompletionMessageParam;
 }
 
-// ── DeepSeek pricing (USD per 1M tokens) ────────────────────────────────────
-const PRICING = {
-  chat:    { prompt: 0.27, completion: 1.10, cacheHit: 0.07 },
-  reasoner:{ prompt: 0.55, completion: 2.19, cacheHit: 0.14 },
-} as const;
-
-function detectModelType(model: string): 'chat' | 'reasoner' {
-  return model.includes('reasoner') || model.toLowerCase().includes('r1') ? 'reasoner' : 'chat';
-}
-
 function printUsage(usage: OpenAI.CompletionUsage, model: string): void {
   const cached = (usage as unknown as Record<string, unknown>)?.prompt_cache_hit_tokens as number | undefined;
   const miss   = (usage as unknown as Record<string, unknown>)?.prompt_cache_miss_tokens as number | undefined;
-  const modelType = detectModelType(model);
-  const p = modelType === 'reasoner' ? PRICING.reasoner : PRICING.chat;
 
   const inputTokens = usage.prompt_tokens ?? 0;
   const outputTokens = usage.completion_tokens ?? 0;
   const cacheHits = cached ?? 0;
+
+  // Look up pricing from the centralized single source of truth in core/usage.ts
+  const p = CORE_PRICING[model] ?? CORE_PRICING['deepseek-v4-flash'];
 
   if (cached !== undefined && (process.env['DEBUG'] || process.env['CODEGRUNT_VERBOSE'])) {
     const total = inputTokens;
@@ -251,19 +242,19 @@ function printUsage(usage: OpenAI.CompletionUsage, model: string): void {
     );
   }
 
-  // Session tracking (in-memory)
+  // Calculate cost from centralized function
+  const totalCost = calculateCost(p, inputTokens, outputTokens, cacheHits);
+
+  // Session tracking (in-memory) — unified UsageStats now includes cost
   addUsage({
     inputTokens,
     outputTokens,
     cacheHitTokens: cacheHits,
     cacheMissTokens: miss ?? 0,
+    cost: totalCost,
   });
 
   // Persist to local usage log (fire-and-forget — don't block the stream)
-  const inputCost = (inputTokens / 1_000_000) * p.prompt;
-  const outputCost = (outputTokens / 1_000_000) * p.completion;
-  const cacheSavings = (cacheHits / 1_000_000) * (p.prompt - p.cacheHit);
-  const totalCost = inputCost + outputCost - cacheSavings;
   recordUsage(inputTokens, outputTokens, cacheHits, totalCost).catch(() => {});
 }
 
