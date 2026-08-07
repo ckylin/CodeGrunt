@@ -1,9 +1,11 @@
 // ── Code Search Tool ──────────────────────────────────────────────────────
 // Semantic symbol search using the local code index built by /index.
-// Falls back to grep-based search if no index exists.
+// Supports both keyword matching and semantic (TF-IDF vector) search
+// when the index was built with --semantic. Falls back to grep-based
+// search if no index exists.
 
 import type { Tool, ToolResult } from '../../types.js';
-import { loadIndex, searchIndex, type CodeSymbol } from '../index/index.js';
+import { loadIndex, searchIndex, searchIndexWithSemantic, type CodeSymbol } from '../index/index.js';
 import { getLogger } from '../observability/logger.js';
 
 const log = getLogger('tools:code_search');
@@ -15,7 +17,7 @@ export const codeSearchTool: Tool = {
     type: 'function',
     function: {
       name: 'code_search',
-      description: 'Search the codebase for symbols (functions, classes, types, exports) by name. Faster and more accurate than search_files for finding definitions. Requires /index to have been run first; falls back to a note if no index exists.',
+      description: 'Search the codebase for symbols (functions, classes, types, exports) by name. Supports semantic fuzzy matching when /index --semantic has been run. Faster and more accurate than search_files for finding definitions. Requires /index to have been run first; falls back to a note if no index exists.',
       parameters: {
         type: 'object',
         properties: {
@@ -49,27 +51,32 @@ export const codeSearchTool: Tool = {
     if (!index) {
       return {
         success: true,
-        output: `No code index found for this project. Run /index to build one first.\n\nFallback: use search_files with pattern "${query}" to find references manually.`,
+        output: `No code index found for this project. Run /index to build one first.\n\nTip: Use /index --semantic for fuzzy/semantic search support.\n\nFallback: use search_files with pattern "${query}" to find references manually.`,
       };
     }
 
     const validKind = kind && VALID_KINDS.has(kind) ? (kind as CodeSymbol['kind']) : undefined;
-    const hits = searchIndex(index, query, maxResults, validKind);
+    const hasSemantic = !!index.semantic;
+
+    // Use semantic search when available, falling back to keyword search
+    const hits = hasSemantic
+      ? searchIndexWithSemantic(index, query, maxResults, validKind)
+      : searchIndex(index, query, maxResults, validKind);
 
     if (hits.length === 0) {
       return {
         success: true,
-        output: `No symbols matching "${query}"${kind ? ` (kind: ${kind})` : ''} found in index.\n\nIndex contains ${index.symbols.length} symbols across ${index.files.length} files.\nBuilt: ${new Date(index.builtAt).toLocaleString()}`,
+        output: `No symbols matching "${query}"${kind ? ` (kind: ${kind})` : ''} found in index.\n\nIndex contains ${index.symbols.length} symbols across ${index.files.length} files.\nBuilt: ${new Date(index.builtAt).toLocaleString()}${hasSemantic ? '\nSearch mode: semantic + keyword' : '\nSearch mode: keyword (run /index --semantic for fuzzy matching)'}`,
       };
     }
 
     const lines = hits.map(h =>
-      `${h.symbol.file}:${h.symbol.line}  [${h.symbol.kind}]  ${h.symbol.name}`
+      `${h.symbol.file}:${h.symbol.line}  [${h.symbol.kind}]  ${h.symbol.name}${hasSemantic ? `  (score: ${h.score.toFixed(1)})` : ''}`
     );
 
     return {
       success: true,
-      output: `Found ${hits.length} result${hits.length > 1 ? 's' : ''} for "${query}":\n\n${lines.join('\n')}\n\nIndex: ${index.symbols.length} symbols, built ${new Date(index.builtAt).toLocaleString()}`,
+      output: `Found ${hits.length} result${hits.length > 1 ? 's' : ''} for "${query}"${hasSemantic ? ' (semantic + keyword)' : ''}:\n\n${lines.join('\n')}\n\nIndex: ${index.symbols.length} symbols, built ${new Date(index.builtAt).toLocaleString()}`,
     };
   },
 };

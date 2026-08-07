@@ -1,6 +1,7 @@
 // ── Code Symbol Index ─────────────────────────────────────────────────────
 // Builds a lightweight index of code symbols (functions, classes, exports)
-// using ripgrep / grep patterns. No external dependencies, no embedding model.
+// using ripgrep / grep patterns. Optionally builds a semantic (TF-IDF) vector
+// index for fuzzy, meaning-aware search.
 //
 // Index format: JSON file per project at ~/.codegrunt/index/<cwd-hash>/index.json
 //   {
@@ -9,7 +10,8 @@
 //     "symbols": [
 //       { "name": "myFunction", "kind": "function", "file": "src/foo.ts", "line": 12 }
 //     ],
-//     "files": ["src/foo.ts", ...]
+//     "files": ["src/foo.ts", ...],
+//     "semantic": { ... }  // optional — only when built with --semantic
 //   }
 //
 // code_search tool uses this index for fast symbol lookup, falling back to
@@ -23,6 +25,15 @@ import { createHash } from 'crypto';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
 import { getLogger } from '../observability/logger.js';
+import {
+  buildSemanticIndex as buildTFIDFIndex,
+  semanticSearch as tfidfSearch,
+  combinedSearch,
+  serializeSemanticIndex,
+  deserializeSemanticIndex,
+  type SemanticIndex,
+  type SemanticHit,
+} from './embedder.js';
 
 const execFileAsync = promisify(execFile);
 const log = getLogger('index');
@@ -44,6 +55,8 @@ export interface CodeIndex {
   cwd: string;
   symbols: CodeSymbol[];
   files: string[];
+  /** Semantic (TF-IDF) vector index — present only when built with --semantic */
+  semantic?: Record<string, unknown>;
 }
 
 // ── Paths ─────────────────────────────────────────────────────────────────
@@ -244,12 +257,24 @@ async function extractSymbols(cwd: string): Promise<RawSymbol[]> {
 
 // ── Build index ───────────────────────────────────────────────────────────
 
+export interface BuildIndexOptions {
+  /** Whether to also build a semantic (TF-IDF) vector index for fuzzy search */
+  semantic?: boolean;
+  /** Progress callback */
+  onProgress?: (msg: string) => void;
+}
+
 export async function buildIndex(
   cwd: string,
-  onProgress?: (msg: string) => void,
+  onProgressOrOptions?: ((msg: string) => void) | BuildIndexOptions,
 ): Promise<CodeIndex> {
+  const opts: BuildIndexOptions = typeof onProgressOrOptions === 'function'
+    ? { onProgress: onProgressOrOptions }
+    : (onProgressOrOptions ?? {});
+  const onProgress = opts.onProgress;
+
   onProgress?.('Scanning files…');
-  log.info('Building code index', { cwd });
+  log.info('Building code index', { cwd, semantic: opts.semantic });
 
   const start = Date.now();
 
@@ -270,11 +295,24 @@ export async function buildIndex(
     files,
   };
 
+  // ── Build semantic (TF-IDF) vector index if requested ────────────────
+  if (opts.semantic) {
+    onProgress?.(`Building semantic index for ${symbols.length} symbols…`);
+    const semanticIndex = buildTFIDFIndex(symbols as CodeSymbol[]);
+    if (semanticIndex) {
+      index.semantic = serializeSemanticIndex(semanticIndex);
+      log.info('Semantic index built', { dims: semanticIndex.dims, entries: semanticIndex.entries.length });
+    } else {
+      log.warn('Not enough symbols for semantic index (min 5 required)');
+    }
+  }
+
   await saveIndex(cwd, index);
 
   const elapsed = Date.now() - start;
-  log.info('Code index built', { symbols: symbols.length, files: files.length, elapsed });
-  onProgress?.(`Indexed ${symbols.length} symbols across ${files.length} files (${elapsed}ms)`);
+  const semInfo = index.semantic ? ` (with semantic vectors, ${Object.keys(index.semantic).length} keys)` : '';
+  log.info('Code index built', { symbols: symbols.length, files: files.length, elapsed, semantic: !!index.semantic });
+  onProgress?.(`Indexed ${symbols.length} symbols across ${files.length} files${semInfo} (${elapsed}ms)`);
 
   return index;
 }
@@ -322,3 +360,50 @@ export function searchIndex(index: CodeIndex, query: string, maxResults = 10, ki
     .sort((a, b) => b.score - a.score)
     .slice(0, maxResults);
 }
+
+// ── Semantic Search ───────────────────────────────────────────────────────
+
+/**
+ * Load the semantic (TF-IDF) index from a CodeIndex if available.
+ * Returns null if no semantic index was built.
+ */
+export function loadSemanticIndex(index: CodeIndex): SemanticIndex | null {
+  if (!index.semantic) return null;
+  try {
+    return deserializeSemanticIndex(index.semantic);
+  } catch {
+    log.warn('Failed to deserialize semantic index');
+    return null;
+  }
+}
+
+/**
+ * Search the index with semantic (TF-IDF) vector similarity + keyword matching.
+ * When a semantic index is available, results are blended for better recall.
+ * Falls back to pure keyword search when no semantic index exists.
+ */
+export function searchIndexWithSemantic(
+  index: CodeIndex,
+  query: string,
+  maxResults = 20,
+  kind?: CodeSymbol['kind'],
+): SearchHit[] {
+  const semIndex = loadSemanticIndex(index);
+
+  if (!semIndex) {
+    // Fall back to keyword-only search
+    return searchIndex(index, query, maxResults, kind);
+  }
+
+  // Get keyword results first
+  const keywordHits = searchIndex(index, query, Math.max(maxResults * 2, 50), kind);
+
+  // Get semantic results
+  const semHits = tfidfSearch(semIndex, query, maxResults * 2);
+
+  // Combine with blended scoring
+  return combinedSearch(keywordHits, semHits, index.symbols, maxResults);
+}
+
+// Re-export types for external consumers
+export type { SemanticIndex, SemanticHit };
