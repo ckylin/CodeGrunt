@@ -15,6 +15,7 @@ const DEFAULTS: CodeGruntConfig = {
   baseURL: 'https://api.deepseek.com',
   reasoningEffort: 'medium',
   autoThinkingMode: true,
+  autoCompact: true,
 };
 
 async function loadConfigFile(): Promise<Partial<CodeGruntConfig>> {
@@ -77,6 +78,7 @@ export async function loadConfig(): Promise<CodeGruntConfig> {
       ?? 'mojeek',
     searxngUrl: process.env.CODEGRUNT_SEARXNG_URL ?? fileConfig.searxngUrl,
     autoThinkingMode: envBool("CODEGRUNT_AUTO_THINKING", fileConfig.autoThinkingMode ?? true),
+    autoCompact: envBool("CODEGRUNT_AUTO_COMPACT", fileConfig.autoCompact ?? true),
   };
 }
 
@@ -99,6 +101,7 @@ export async function saveConfig(config: CodeGruntConfig): Promise<void> {
         searchEngine: config.searchEngine,
         searxngUrl: config.searxngUrl,
         autoThinkingMode: config.autoThinkingMode,
+        autoCompact: config.autoCompact,
       },
       null,
       2,

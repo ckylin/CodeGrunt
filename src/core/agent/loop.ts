@@ -44,6 +44,52 @@ import { getLogger } from '../observability/logger.js';
 
 const log = getLogger('agent');
 
+// ── Auto-compact (extracted for unit testing) ────────────────────────────
+// v0.8: gated by config.autoCompact (default true). When disabled, the flag
+// is intentionally left set on the context so the warning repeats every turn
+// until the user runs /compact manually — summarization is a one-way,
+// token-costing operation, so a user who opted out should never have it
+// happen silently.
+export async function maybeAutoCompact(
+  context: ContextManager,
+  provider: import('../../types.js').LLMProvider,
+  model: string,
+  lang: 'zh' | 'en',
+  cwd: string,
+  autoCompactEnabled: boolean,
+  signal?: AbortSignal,
+): Promise<void> {
+  if (!context.needsCompact) return;
+
+  if (!autoCompactEnabled) {
+    process.stdout.write(chalk.yellow('  [context near capacity — run /compact to summarize, or set CODEGRUNT_AUTO_COMPACT=1]\n'));
+    log.info('Auto-compact skipped (autoCompact disabled)');
+    return;
+  }
+
+  context.needsCompact = false;
+  process.stdout.write(chalk.gray('  [compacting context'));
+  try {
+    const compactResult = await compactMessages(context.getMessages(), {
+      provider,
+      model,
+      language: lang,
+      signal,
+    });
+    if (compactResult) {
+      context.compact(compactResult.summary);
+      saveSessionSummary(cwd, compactResult.summary).catch(() => {});
+      process.stdout.write(chalk.gray(`  ${compactResult.beforeTokens}→${compactResult.afterTokens} tokens]\n`));
+      log.info('Auto-compact complete', { before: compactResult.beforeTokens, after: compactResult.afterTokens });
+    } else {
+      process.stdout.write(chalk.gray('  skipped]\n'));
+    }
+  } catch (err) {
+    process.stdout.write(chalk.gray('  failed, continuing]\n'));
+    log.warn('Auto-compact failed', { error: err instanceof Error ? err.message : String(err) });
+  }
+}
+
 // ── Main Agent Loop (P/G/E orchestration) ────────────────────────────────
 
 export async function runAgentLoop(options: AgentRunOptions): Promise<void> {
@@ -71,29 +117,7 @@ export async function runAgentLoop(options: AgentRunOptions): Promise<void> {
   // Auto-compact: if the context flagged itself as near-capacity on the previous
   // turn, summarize before running the next agent turn so history is preserved
   // rather than silently dropped. Runs a single LLM call to produce the summary.
-  if (context.needsCompact) {
-    context.needsCompact = false;
-    process.stdout.write(chalk.gray('  [compacting context'));
-    try {
-      const compactResult = await compactMessages(context.getMessages(), {
-        provider,
-        model,
-        language: lang,
-        signal,
-      });
-      if (compactResult) {
-        context.compact(compactResult.summary);
-        saveSessionSummary(cwd, compactResult.summary).catch(() => {});
-        process.stdout.write(chalk.gray(`  ${compactResult.beforeTokens}→${compactResult.afterTokens} tokens]\n`));
-        log.info('Auto-compact complete', { before: compactResult.beforeTokens, after: compactResult.afterTokens });
-      } else {
-        process.stdout.write(chalk.gray('  skipped]\n'));
-      }
-    } catch (err) {
-      process.stdout.write(chalk.gray('  failed, continuing]\n'));
-      log.warn('Auto-compact failed', { error: err instanceof Error ? err.message : String(err) });
-    }
-  }
+  await maybeAutoCompact(context, provider, model, lang, cwd, config.autoCompact ?? true, signal);
   // ══════════════════════════════════════════════════════════════════════
 
   log.info('Phase 0: Intentor — classifying intent');

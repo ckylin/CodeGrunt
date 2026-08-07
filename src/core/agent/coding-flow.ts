@@ -14,6 +14,7 @@ import { getDefaultMetrics } from '../observability/metrics.js';
 import { getLogger } from '../observability/logger.js';
 import {
   printPlanHeader, printStepProgress, printEvaluation, printRefineIndicator,
+  printPlanTree, type PlanStepStatus,
 } from '../../utils/display.js';
 import { generatePlan } from './planner.js';
 import { evaluateStep } from './evaluator.js';
@@ -103,6 +104,9 @@ export async function runCodingFlow(
   let finalAssistantText = '';
   let userRejected = false;
   let sessionHasRead = false;
+  // Per-step status for the /plan tree visualization (v0.8) — redrawn on
+  // every step transition so CODEGRUNT_VERBOSE users see live √/×/→ markers.
+  const stepStatuses: PlanStepStatus[] = plan.steps.map(() => 'pending');
   // One PrepareContextStage instance shared across all steps/retries so system
   // prompt is only loaded once and the cache-stability guard works correctly.
   const prepareStage = new PrepareContextStage();
@@ -123,6 +127,8 @@ export async function runCodingFlow(
 
     const step = plan.steps[stepIdx];
     printStepProgress(stepIdx, plan.steps.length, step.description);
+    stepStatuses[stepIdx] = 'in_progress';
+    printPlanTree(plan, stepStatuses);
 
     let stepPassed = false;
     let lastEval: EvaluationResult | null = null;
@@ -227,6 +233,8 @@ export async function runCodingFlow(
         stepPassed = true;
         finalAssistantText = genResult.pipeCtx.assistantText;
         pruneRefineMessages(context);
+        stepStatuses[stepIdx] = 'done';
+        printPlanTree(plan, stepStatuses);
         break;
       }
 
@@ -257,15 +265,23 @@ export async function runCodingFlow(
           context.push({ role: 'user', content: warningMsg });
           stepPassed = true;
           finalAssistantText = genResult.pipeCtx.assistantText;
+          stepStatuses[stepIdx] = 'done';
+          printPlanTree(plan, stepStatuses);
         } else {
           userRejected = true;
+          stepStatuses[stepIdx] = 'failed';
+          printPlanTree(plan, stepStatuses);
           break;
         }
       }
     }
 
     if (userRejected) break;
-    if (!stepPassed) log.error('Step failed after all retries', { stepId: step.id });
+    if (!stepPassed) {
+      log.error('Step failed after all retries', { stepId: step.id });
+      stepStatuses[stepIdx] = 'failed';
+      printPlanTree(plan, stepStatuses);
+    }
   }
   } finally {
     // Idempotent — no-op if the normal-path calls already pruned these messages.

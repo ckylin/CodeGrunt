@@ -129,6 +129,17 @@ export interface CodeGruntConfig {
    * output tokens a response generates — so this defaults to on.
    */
   autoThinkingMode?: boolean;
+  /**
+   * When true (default), the agent loop automatically summarizes and replaces
+   * conversation history via compactMessages() as soon as ContextManager flags
+   * `needsCompact` (70% token budget or 40+ messages) — no user action needed.
+   * When false, the loop only prints a one-line warning and leaves the context
+   * untouched; the user must run `/compact` manually to actually free up space.
+   * Set to false if you want full control over when a summarization LLM call
+   * happens (it costs tokens and is irreversible — the original messages are
+   * discarded once compacted).
+   */
+  autoCompact?: boolean;
 }
 
 // ── Habit tracking ──────────────────────────────────────────────────────────

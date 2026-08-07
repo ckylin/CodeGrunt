@@ -65,6 +65,57 @@ export function printStepProgress(stepIndex: number, totalSteps: number, descrip
   process.stdout.write('\n' + muted(`  ${stepIndex + 1}/${totalSteps}  `) + truncated + '\n');
 }
 
+// ── /plan Tree Visualization (v0.8) ──────────────────────────────────────
+// Status per step, mirroring how coding-flow.ts drives the retry loop:
+//   'pending'     — not started yet
+//   'in_progress' — currently running (including refine retries)
+//   'done'        — evaluator passed (or user chose to continue past failure)
+//   'failed'      — max retries exhausted and user rejected continuing
+export type PlanStepStatus = 'pending' | 'in_progress' | 'done' | 'failed';
+
+const STEP_ICONS: Record<PlanStepStatus, string> = {
+  pending: ' ',
+  in_progress: '→',
+  done: '√',
+  failed: '×',
+};
+
+function stepIconColor(status: PlanStepStatus, icon: string): string {
+  switch (status) {
+    case 'done': return chalk.green(icon);
+    case 'failed': return danger(icon);
+    case 'in_progress': return blue(icon);
+    default: return muted(icon);
+  }
+}
+
+/**
+ * Render a TaskPlan as an ASCII tree with per-step status icons.
+ * Pure function (no I/O) so it can be unit tested directly; printPlanTree()
+ * below is the side-effecting wrapper gated by CODEGRUNT_VERBOSE.
+ */
+export function renderPlanTree(plan: TaskPlan, stepStatuses: PlanStepStatus[]): string {
+  const lines: string[] = [];
+  lines.push(blue('▸') + '  ' + chalk.bold(plan.goal) + muted(`  (${plan.steps.length} steps)`));
+
+  plan.steps.forEach((step, i) => {
+    const status = stepStatuses[i] ?? 'pending';
+    const isLast = i === plan.steps.length - 1;
+    const branch = isLast ? '└─' : '├─';
+    const icon = stepIconColor(status, STEP_ICONS[status]);
+    const desc = status === 'failed' ? danger(step.description) : step.description;
+    lines.push(`  ${muted(branch)} ${icon} ${desc}`);
+  });
+
+  return lines.join('\n');
+}
+
+/** Print the plan tree (with live step statuses) — silent by default */
+export function printPlanTree(plan: TaskPlan, stepStatuses: PlanStepStatus[]): void {
+  if (!process.env['CODEGRUNT_VERBOSE']) return;
+  process.stdout.write('\n' + renderPlanTree(plan, stepStatuses) + '\n');
+}
+
 /** Display evaluation result — silent unless DEBUG or CODEGRUNT_VERBOSE */
 export function printEvaluation(evaluation: EvaluationResult, _language: 'zh' | 'en'): void {
   if (evaluation.passed) return;
