@@ -1,16 +1,57 @@
 import { spawn } from 'child_process';
+import { platform } from 'os';
 import type { Tool, ToolResult } from '../../types.js';
 
 const DEFAULT_TIMEOUT_MS = 30_000;
 const MAX_TIMEOUT_MS = 300_000; // 5 minutes hard cap
 const MAX_OUTPUT_BYTES = 512 * 1024; // 512 KB cap to avoid huge outputs stalling the LLM
 
+// ── Platform-aware tool description ──────────────────────────────────────
+// The LLM frequently generates commands for the wrong OS. By embedding the
+// exact platform and concrete syntax examples directly into the tool
+// description (which the model reads right before generating the function
+// call), we dramatically reduce cross-platform command errors.
+
+function buildShellDescription(): string {
+  const base = 'Execute a shell command and return its output. The working directory is already set to the project root — do NOT prepend "cd <path> &&" to commands. Use for running tests, builds, installing packages, git commands, etc. Timeout: default 30s, max 5 minutes.';
+
+  if (platform() === 'win32') {
+    return `${base}
+
+⚠️  YOU ARE ON WINDOWS. Commands run in cmd.exe. You MUST use Windows syntax:
+- Use backslashes in paths: C:\\Users\\... not /home/...
+- List files: dir not ls
+- Remove file: del not rm
+- Remove directory: rmdir /s not rm -rf
+- Copy: copy not cp
+- Move: move not mv
+- Print to stdout: echo %VAR% not echo $VAR
+- Set env: set VAR=value not export VAR=value
+- Chain commands with && (same as Unix)
+- npm/npx/node work the same as on Unix — prefer them when possible`;
+  }
+
+  // macOS or Linux — POSIX
+  return `${base}
+
+You are on ${platform() === 'darwin' ? 'macOS' : 'Linux'}. Use POSIX shell syntax:
+- Use forward slashes in paths: /home/user/...
+- List files: ls -la
+- Remove: rm -rf
+- Copy: cp -r
+- Move: mv
+- Print: echo $VAR
+- Set env: export VAR=value
+- Chain commands with &&
+- npm/npx/node work as usual`;
+}
+
 export const executeShellTool: Tool = {
   definition: {
     type: 'function',
     function: {
       name: 'execute_shell',
-      description: 'Execute a shell command and return its output. The working directory is already set to the project root — do NOT prepend "cd <path> &&" to commands. Use for running tests, builds, installing packages, git commands, etc. Timeout: default 30s, max 5 minutes.',
+      description: buildShellDescription(),
       parameters: {
         type: 'object',
         properties: {
