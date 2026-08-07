@@ -398,8 +398,15 @@ export function searchIndexWithSemantic(
   // Get keyword results first
   const keywordHits = searchIndex(index, query, Math.max(maxResults * 2, 50), kind);
 
-  // Get semantic results
-  const semHits = tfidfSearch(semIndex, query, maxResults * 2);
+  // Get semantic results. tfidfSearch has no notion of `kind` (it only knows
+  // about the vector space), so a `kind` filter here must be re-applied
+  // afterwards — otherwise a wrong-kind symbol with a strong semantic score
+  // slips into combinedSearch's merge and the caller's filter is silently
+  // bypassed for anything that only matched semantically.
+  let semHits = tfidfSearch(semIndex, query, maxResults * 2);
+  if (kind) {
+    semHits = semHits.filter(h => index.symbols[h.symbolIndex]?.kind === kind);
+  }
 
   // Combine with blended scoring
   return combinedSearch(keywordHits, semHits, index.symbols, maxResults);
