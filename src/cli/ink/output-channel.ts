@@ -83,6 +83,14 @@ export function write(text: string): void {
  * the pre-existing UIStreamEmitter behavior. In sink mode it accumulates
  * into a buffer and pushes the FULL buffer to the sink, since Ink re-renders
  * the whole live region from scratch each time rather than appending.
+ *
+ * Use this when the caller has no rendering of its own to apply (plain
+ * text). Callers that re-render their own accumulated buffer on every delta
+ * (e.g. UIStreamEmitter running raw text through MarkdownRenderer fresh each
+ * time so completed lines/blocks stay correctly formatted as more text
+ * streams in after them) should call setLiveTextDirect() instead —
+ * appendLiveText() would double-accumulate a value that's already the full
+ * rendered buffer, not a delta.
  */
 export function appendLiveText(delta: string): void {
   if (sink) {
@@ -91,6 +99,20 @@ export function appendLiveText(delta: string): void {
   } else {
     process.stdout.write(delta);
   }
+}
+
+/**
+ * Sets the live-text buffer to EXACTLY `text` (no accumulation) — for
+ * callers that maintain and re-render their own full buffer each call. In
+ * fallback mode there's no equivalent operation (stdout is append-only), so
+ * this is a sink-mode-only no-op there; a caller needing fallback-mode
+ * output too should also call the caller's own stdout.write path directly
+ * (see UIStreamEmitter.onTextDelta for the pattern: sinkMode branches to
+ * setLiveTextDirect(), the else branch still writes to stdout itself).
+ */
+export function setLiveTextDirect(text: string): void {
+  liveTextBuffer = text;
+  if (sink) sink.setLiveText(text);
 }
 
 /**

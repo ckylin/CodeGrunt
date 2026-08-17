@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import {
   registerSink, unregisterSink, hasSink,
-  write, appendLiveText, commitLiveText, discardLiveText, setLiveTool,
+  write, appendLiveText, setLiveTextDirect, commitLiveText, discardLiveText, setLiveTool,
 } from '../../src/cli/ink/output-channel.js';
 import type { OutputChannelSink } from '../../src/cli/ink/output-channel.js';
 
@@ -52,6 +52,11 @@ describe('output-channel fallback mode (no sink registered)', () => {
 
   it('setLiveTool() is a no-op in fallback mode (tool-spinner.ts owns its own stdout path)', () => {
     setLiveTool({ name: 'read_file', argPreview: 'x.ts', frame: '⠋', elapsedMs: 0 });
+    expect(writeSpy).not.toHaveBeenCalled();
+  });
+
+  it('setLiveTextDirect() is a no-op in fallback mode (no sink to render into, and stdout is append-only)', () => {
+    setLiveTextDirect('some rendered text');
     expect(writeSpy).not.toHaveBeenCalled();
   });
 });
@@ -128,6 +133,22 @@ describe('output-channel sink mode (registered sink)', () => {
     appendLiveText('turn two');
     expect(sink.liveText[sink.liveText.length - 1]).toBe('turn two');
     expect(sink.lines).toEqual(['turn one']);
+  });
+
+  it('setLiveTextDirect() replaces the buffer exactly (no accumulation), unlike appendLiveText()', () => {
+    const sink = makeMockSink();
+    registerSink(sink);
+    setLiveTextDirect('rendered block v1');
+    setLiveTextDirect('rendered block v1 and v2');
+    expect(sink.liveText).toEqual(['rendered block v1', 'rendered block v1 and v2']);
+  });
+
+  it('commitLiveText() also finalizes a buffer set via setLiveTextDirect() (not just appendLiveText())', () => {
+    const sink = makeMockSink();
+    registerSink(sink);
+    setLiveTextDirect('a fully-rendered live block');
+    commitLiveText();
+    expect(sink.lines).toEqual(['a fully-rendered live block']);
   });
 
   it('setLiveTool() forwards the info object to the sink', () => {

@@ -16,6 +16,7 @@ import {
 } from '../../utils/display.js';
 import { MarkdownRenderer } from '../../utils/markdown.js';
 import { isReasonerModel } from '../../config.js';
+import { setLiveTextDirect, commitLiveText, hasSink } from '../../cli/ink/output-channel.js';
 
 // ── Pipeline imports ────────────────────────────────────────────────────
 import {
@@ -41,8 +42,22 @@ export class UIStreamEmitter implements StreamEmitter {
   private assistantTextStarted = false;
   private thinkingStartTime: number | null = null;
   private reasoningText = '';
+  private rawAssistantText = '';
   private outputTokens = 0;
-  private thinkingSpinner = ora({ text: chalk.gray('Thinking...'), color: 'gray', stream: process.stdout });
+  // ora's spinner writes raw ANSI cursor-movement bytes straight to
+  // process.stdout on its own \80ms tick — safe only in fallback mode
+  // (one-shot `codegrunt "<task>"`, no persistent App mounted). Once a sink
+  // is registered, the persistent App's StatusBar already shows an
+  // equivalent "Ns · Esc to cancel" readout (driven by AppHandle.setBusy()
+  // in repl.ts) and Ink owns the terminal's live region — a second thing
+  // moving the cursor on its own tick would tear the frame. hasSink() is
+  // snapshotted once per emitter instance (one per runGenerator() call) —
+  // it cannot change mid-turn since sink registration only happens at REPL
+  // startup/shutdown, not during a turn.
+  private readonly sinkMode = hasSink();
+  private thinkingSpinner = this.sinkMode
+    ? null
+    : ora({ text: chalk.gray('Thinking...'), color: 'gray', stream: process.stdout });
   private startTime: number;
   private iteration: number;
   private onText?: (text: string) => void;
@@ -54,17 +69,19 @@ export class UIStreamEmitter implements StreamEmitter {
   }
 
   private updateThinkingText(): void {
+    if (!this.thinkingSpinner) return;
     const elapsed = Math.floor((Date.now() - this.startTime) / 1000);
     const iterInfo = this.iteration > 0 ? ` . iter ${this.iteration + 1}/${MAX_ITERATIONS}` : '';
     this.thinkingSpinner.text = chalk.gray(`Thinking... (${elapsed}s . ${this.outputTokens} tokens${iterInfo}  Esc to cancel)`);
   }
 
   showThinking(): void {
+    if (!this.thinkingSpinner) return;
     if (!this.thinkingSpinner.isSpinning) {
       this.thinkingSpinner.start();
       this.updateThinkingText();
       const ticker = setInterval(() => {
-        if (this.thinkingSpinner.isSpinning) this.updateThinkingText();
+        if (this.thinkingSpinner?.isSpinning) this.updateThinkingText();
         else clearInterval(ticker);
       }, 1000);
     } else {
@@ -79,7 +96,7 @@ export class UIStreamEmitter implements StreamEmitter {
   }
 
   hideThinking(): void {
-    if (this.thinkingSpinner.isSpinning) {
+    if (this.thinkingSpinner?.isSpinning) {
       this.thinkingSpinner.stop();
     }
   }
@@ -92,8 +109,29 @@ export class UIStreamEmitter implements StreamEmitter {
     }
     this.outputTokens += Math.ceil(text.length / 4);
     this.onText?.(text);
-    const formatted = this.md.feed(text);
-    if (formatted) process.stdout.write(formatted);
+    if (this.sinkMode) {
+      // Sink mode re-renders the FULL accumulated raw text through a FRESH
+      // MarkdownRenderer on every delta, rather than reusing this.md's
+      // incremental feed()/flush() pair — that pair is stateful and
+      // append-only (it commits each completed line exactly once and can't
+      // re-render an already-committed line), which matches the fallback
+      // path's one-shot stdout writes but not sink mode's "redraw the whole
+      // live region from scratch" model. Re-parsing the whole buffer each
+      // delta is more work per keystroke, but turn-length text streams are
+      // small enough (low thousands of chars) that this is not a measurable
+      // cost. Note this does NOT give an in-progress code block a live
+      // preview before its closing ``` fence arrives — MarkdownRenderer
+      // itself buffers a code block until it closes, in both modes — this
+      // re-render only ensures completed lines/blocks appear correctly as
+      // more text streams in after them, matching fallback mode's output
+      // exactly rather than adding new formatting behavior.
+      this.rawAssistantText += text;
+      const liveRenderer = new MarkdownRenderer();
+      setLiveTextDirect(liveRenderer.feed(this.rawAssistantText) + liveRenderer.flush());
+    } else {
+      const formatted = this.md.feed(text);
+      if (formatted) process.stdout.write(formatted);
+    }
   }
 
   onReasoningDelta(text: string): void {
@@ -109,8 +147,12 @@ export class UIStreamEmitter implements StreamEmitter {
 
   onFinish(_reason: string): void {
     this.hideThinking();
-    const flushOut = this.md.flush();
-    if (flushOut) process.stdout.write(flushOut);
+    if (this.sinkMode) {
+      commitLiveText();
+    } else {
+      const flushOut = this.md.flush();
+      if (flushOut) process.stdout.write(flushOut);
+    }
 
     if (this.reasoningText && this.thinkingStartTime !== null) {
       const elapsed = Date.now() - this.thinkingStartTime;
