@@ -15,6 +15,7 @@
 import chalk from 'chalk';
 import { isReasonerModel } from '../../config.js';
 import type { LLMProvider, Message, StreamChunk } from '../../types.js';
+import { hasSink } from '../../cli/ink/output-channel.js';
 
 // ── Constants ───────────────────────────────────────────────────────────────
 
@@ -128,7 +129,11 @@ async function streamSummary(
   // Dot-progress indicator — streamSummary can be called from compactMessages
   // which may run 1-3+ LLM calls for chunking + merging. Gives user visible
   // feedback without interfering with concurrent spinners in commands.ts.
-  const dotInterval = setInterval(() => {
+  // Skipped once a persistent App is mounted (hasSink() true) — appending
+  // bare dots straight to stdout would land outside Ink's live region and
+  // tear the frame; compaction is infrequent and the auto-compact caller in
+  // loop.ts already writes a "[compacting context ...]" line before/after.
+  const dotInterval = hasSink() ? null : setInterval(() => {
     process.stdout.write(chalk.gray('.'));
   }, 1000);
 
@@ -150,7 +155,7 @@ async function streamSummary(
     }
     return summary.trim();
   } finally {
-    clearInterval(dotInterval);
+    if (dotInterval) clearInterval(dotInterval);
   }
 }
 

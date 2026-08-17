@@ -16,6 +16,7 @@ import type { IntentResult } from '../pipeline/types.js';
 import { MAX_ITERATIONS, displayToolCalls, runGenerator } from './generator.js';
 import { PrepareContextStage } from '../pipeline/stages/prepare-context.js';
 import { runSubagent } from './subagent.js';
+import { write as chWrite } from '../../cli/ink/output-channel.js';
 
 const log = getLogger('agent:skill-flow');
 
@@ -29,7 +30,7 @@ export async function runSkillFlow(
   const { onToolCall, onToolResult, signal } = options;
 
   log.info('Skill flow', { skill: skill.name, mode: skill.mode ?? 'inline' });
-  process.stdout.write(chalk.gray(`  skill: ${skill.name}\n`));
+  chWrite(chalk.gray(`  skill: ${skill.name}\n`));
 
   const skillTask = `${skill.content}\n\n---\n${options.task}`;
 

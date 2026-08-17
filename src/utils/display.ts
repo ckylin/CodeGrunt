@@ -2,6 +2,7 @@ import chalk from 'chalk';
 import type { TaskPlan, EvaluationResult, IntentResult } from '../core/pipeline/types.js';
 import { ACCENT, muted } from './constants.js';
 import { formatErrorForDisplay } from '../core/errors.js';
+import { write as chWrite } from '../cli/ink/output-channel.js';
 
 const blue  = (s: string) => chalk.hex(ACCENT)(s);
 const danger  = chalk.red;
@@ -23,15 +24,25 @@ export function printAssistantHeader(): void {
   const labelLen = ' CodeGrunt '.length;
   const fill = Math.max(0, cols - labelLen - 2);
   const half = Math.floor(fill / 2);
-  process.stdout.write(
+  chWrite(
     '\n' + muted('-'.repeat(half)) + label + muted('-'.repeat(fill - half)) + '\n\n'
   );
 }
 
 export function printThinkingCollapsed(reasoningText: string, elapsedMs: number): void {
   const secs = Math.round(elapsedMs / 1000);
-  process.stdout.write(muted(`  thought for ${secs}s\n\n`));
+  chWrite(muted(`  thought for ${secs}s\n\n`));
 }
+
+// printError/printTypedError intentionally still write directly to stderr,
+// NOT through output-channel.ts — that module only has a stdout-routed
+// writeLine(), and these two are called from repl.ts's/index.ts's top-level
+// catch blocks, which only run AFTER runAgentLoop's promise has already
+// settled (i.e. after App.setBusy(false) — see the "3/7" and "5/7" commits).
+// The live region is idle by then, so a raw stderr write is safe — it won't
+// race with anything Ink is actively redrawing. Known residual gap: an
+// error path that fires WHILE the live region is active (there isn't one
+// today) would need output-channel.ts to grow stderr support first.
 
 export function printError(message: string): void {
   process.stderr.write(danger('  error  ') + message + '\n');
@@ -54,9 +65,9 @@ export function printTypedError(err: unknown): void {
 export function printIntentResult(intent: IntentResult): void {
   if (!process.env['CODEGRUNT_VERBOSE']) return;
   if (intent.matchedSkill) {
-    process.stdout.write(muted(`  skill: ${intent.matchedSkill.name}\n`));
+    chWrite(muted(`  skill: ${intent.matchedSkill.name}\n`));
   } else if (!intent.isCoding) {
-    process.stdout.write(muted('  chat mode\n'));
+    chWrite(muted('  chat mode\n'));
   }
 }
 
@@ -64,14 +75,14 @@ export function printIntentResult(intent: IntentResult): void {
 export function printPlanHeader(plan: TaskPlan): void {
   if (!process.env['CODEGRUNT_VERBOSE']) return;
   const stepCount = plan.steps.length;
-  process.stdout.write('\n  ' + blue('▸') + '  ' + chalk.bold(plan.goal) + muted(`  (${stepCount} steps)`) + '\n');
+  chWrite('\n  ' + blue('▸') + '  ' + chalk.bold(plan.goal) + muted(`  (${stepCount} steps)`) + '\n');
 }
 
 /** Display current step progress — silent by default */
 export function printStepProgress(stepIndex: number, totalSteps: number, description: string): void {
   if (!process.env['CODEGRUNT_VERBOSE']) return;
   const truncated = description.length > 60 ? description.slice(0, 60) + '…' : description;
-  process.stdout.write('\n' + muted(`  ${stepIndex + 1}/${totalSteps}  `) + truncated + '\n');
+  chWrite('\n' + muted(`  ${stepIndex + 1}/${totalSteps}  `) + truncated + '\n');
 }
 
 // ── /plan Tree Visualization (v0.8) ──────────────────────────────────────
@@ -124,7 +135,7 @@ export function renderPlanTree(plan: TaskPlan, stepStatuses: PlanStepStatus[]): 
 /** Print the plan tree (with live step statuses) — silent by default */
 export function printPlanTree(plan: TaskPlan, stepStatuses: PlanStepStatus[]): void {
   if (!process.env['CODEGRUNT_VERBOSE']) return;
-  process.stdout.write('\n' + renderPlanTree(plan, stepStatuses) + '\n');
+  chWrite('\n' + renderPlanTree(plan, stepStatuses) + '\n');
 }
 
 /** Display evaluation result — silent unless DEBUG or CODEGRUNT_VERBOSE */
@@ -132,14 +143,14 @@ export function printEvaluation(evaluation: EvaluationResult, _language: 'zh' | 
   if (evaluation.passed) return;
   if (!process.env['DEBUG'] && !process.env['CODEGRUNT_VERBOSE']) return;
   const scoreColor = evaluation.score >= 60 ? warning : danger;
-  process.stdout.write('  ' + danger('✗') + '  ' + scoreColor(`${evaluation.score}/100`) + '\n');
+  chWrite('  ' + danger('✗') + '  ' + scoreColor(`${evaluation.score}/100`) + '\n');
   for (const issue of evaluation.issues.slice(0, 2)) {
-    process.stdout.write('  ' + muted('  ') + danger(String(issue).slice(0, 100)) + '\n');
+    chWrite('  ' + muted('  ') + danger(String(issue).slice(0, 100)) + '\n');
   }
 }
 
 /** Display refinement retry indicator — silent by default */
 export function printRefineIndicator(retryCount: number, maxRetries: number, _language: 'zh' | 'en'): void {
   if (!process.env['CODEGRUNT_VERBOSE']) return;
-  process.stdout.write(muted(`  retrying ${retryCount}/${maxRetries}…\n`));
+  chWrite(muted(`  retrying ${retryCount}/${maxRetries}…\n`));
 }

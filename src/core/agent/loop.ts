@@ -19,6 +19,7 @@ import { loadWorkspacePermissions } from '../permissions/index.js';
 import { detectInputLanguage } from '../memory/habits.js';
 import type { TurnSignal } from '../../types.js';
 import { printIntentResult } from '../../utils/display.js';
+import { write as chWrite } from '../../cli/ink/output-channel.js';
 import { CHAT_CONTEXT_BUDGET } from '../../config.js';
 import { detectSystemLanguage } from '../../utils/locale.js';
 import { compactMessages } from '../context/compact.js';
@@ -62,13 +63,20 @@ export async function maybeAutoCompact(
   if (!context.needsCompact) return;
 
   if (!autoCompactEnabled) {
-    process.stdout.write(chalk.yellow('  [context near capacity — run /compact to summarize, or set CODEGRUNT_AUTO_COMPACT=1]\n'));
+    chWrite(chalk.yellow('  [context near capacity — run /compact to summarize, or set CODEGRUNT_AUTO_COMPACT=1]\n'));
     log.info('Auto-compact skipped (autoCompact disabled)');
     return;
   }
 
   context.needsCompact = false;
-  process.stdout.write(chalk.gray('  [compacting context'));
+  // Deliberately one single writeLine() below with the whole "[compacting
+  // context ... N→M tokens]" message assembled first, rather than the
+  // three separate \r-free stdout.write calls this used to be — those relied
+  // on writes landing on the same terminal line without anything else
+  // interleaving, which output-channel.ts's sink mode does not guarantee
+  // (a writeLine() call is a discrete, permanent history entry, not a
+  // continuation of the previous one).
+  let resultSuffix: string;
   try {
     const compactResult = await compactMessages(context.getMessages(), {
       provider,
@@ -79,15 +87,16 @@ export async function maybeAutoCompact(
     if (compactResult) {
       context.compact(compactResult.summary);
       saveSessionSummary(cwd, compactResult.summary).catch(() => {});
-      process.stdout.write(chalk.gray(`  ${compactResult.beforeTokens}→${compactResult.afterTokens} tokens]\n`));
+      resultSuffix = `${compactResult.beforeTokens}→${compactResult.afterTokens} tokens]`;
       log.info('Auto-compact complete', { before: compactResult.beforeTokens, after: compactResult.afterTokens });
     } else {
-      process.stdout.write(chalk.gray('  skipped]\n'));
+      resultSuffix = 'skipped]';
     }
   } catch (err) {
-    process.stdout.write(chalk.gray('  failed, continuing]\n'));
+    resultSuffix = 'failed, continuing]';
     log.warn('Auto-compact failed', { error: err instanceof Error ? err.message : String(err) });
   }
+  chWrite(chalk.gray(`  [compacting context  ${resultSuffix}\n`));
 }
 
 // ── Main Agent Loop (P/G/E orchestration) ────────────────────────────────
@@ -137,7 +146,7 @@ export async function runAgentLoop(options: AgentRunOptions): Promise<void> {
   const routedModel = selectModelForTask(model, task, intent);
   let activeOptions = options;
   if (routedModel !== model) {
-    process.stdout.write(chalk.gray(`  [auto-route: ${model} → ${routedModel}]\n`));
+    chWrite(chalk.gray(`  [auto-route: ${model} → ${routedModel}]\n`));
     log.info('Model auto-routed', { from: model, to: routedModel });
     activeOptions = { ...options, config: { ...config, model: routedModel } };
     setSubagentContext(provider, routedModel);
@@ -151,13 +160,13 @@ export async function runAgentLoop(options: AgentRunOptions): Promise<void> {
   if (complexity.isCode) {
     if (complexity.tier === 'simple') {
       activeOptions = { ...activeOptions, thinking: 'disabled' as const };
-      process.stdout.write(chalk.gray(`  [thinking: disabled (simple task)]\n`));
+      chWrite(chalk.gray(`  [thinking: disabled (simple task)]\n`));
       log.info('Thinking disabled for simple task');
     } else if (complexity.tier === 'complex') {
       const autoThinking = config.autoThinkingMode ?? true;
       if (autoThinking) {
         activeOptions = { ...activeOptions, thinking: 'enabled' as const };
-        process.stdout.write(chalk.gray(`  [thinking: enabled (complex task)]\n`));
+        chWrite(chalk.gray(`  [thinking: enabled (complex task)]\n`));
         log.info('Thinking enabled for complex task');
       }
     }

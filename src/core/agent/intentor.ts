@@ -16,6 +16,7 @@ import type { IntentResult } from '../pipeline/types.js';
 import type { Skill } from '../../cli/skills.js';
 import { getLogger } from '../observability/logger.js';
 import { getDefaultMetrics } from '../observability/metrics.js';
+import { hasSink } from '../../cli/ink/output-channel.js';
 
 const log = getLogger('intentor');
 
@@ -227,7 +228,14 @@ function parseIntentResult(raw: string, fallback: boolean, skills: Skill[]): Int
 
 // ── Spinner helpers ──────────────────────────────────────────────────────
 
-function startSpinner(text: string): ReturnType<typeof setInterval> {
+// \r-based cursor-position spinner — safe only when nothing else owns the
+// terminal's live region. Once a persistent App is mounted (hasSink() true),
+// Ink owns that region; a second thing moving the cursor on its own would
+// tear the frame. Skip the visual entirely in that mode — classification is
+// a single fast heuristic check or one cheap LLM call, not a long enough
+// wait to need a spinner.
+function startSpinner(text: string): ReturnType<typeof setInterval> | null {
+  if (hasSink()) return null;
   const frames = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
   let idx = 0;
   const interval = setInterval(() => {
@@ -237,7 +245,8 @@ function startSpinner(text: string): ReturnType<typeof setInterval> {
   return interval;
 }
 
-function stopSpinner(interval: ReturnType<typeof setInterval>): void {
+function stopSpinner(interval: ReturnType<typeof setInterval> | null): void {
+  if (!interval) return;
   clearInterval(interval);
   process.stdout.write('\r' + ' '.repeat(40) + '\r');
 }

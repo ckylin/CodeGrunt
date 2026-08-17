@@ -10,6 +10,7 @@ import { getDefaultMetrics } from '../observability/metrics.js';
 import { getLogger } from '../observability/logger.js';
 import { MAX_ITERATIONS, displayToolCalls, runGenerator } from './generator.js';
 import { PrepareContextStage } from '../pipeline/stages/prepare-context.js';
+import { write as chWrite } from '../../cli/ink/output-channel.js';
 
 const log = getLogger('agent:chat-flow');
 
@@ -47,7 +48,7 @@ export async function runChatFlow(
     const fallback = lang === 'zh'
       ? chalk.gray('  (模型未返回文本响应)\n')
       : chalk.gray('  (no text response from model)\n');
-    process.stdout.write(fallback);
+    chWrite(fallback);
   }
 
   log.info('Chat flow complete', { iterations: iteration });

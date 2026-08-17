@@ -21,6 +21,7 @@ import { evaluateStep } from './evaluator.js';
 import type { TaskPlan, EvaluationResult, IntentResult } from '../pipeline/types.js';
 import { MAX_ITERATIONS, MAX_REFINE_RETRIES, displayToolCalls, runGenerator } from './generator.js';
 import { PrepareContextStage } from '../pipeline/stages/prepare-context.js';
+import { write as chWrite, hasSink } from '../../cli/ink/output-channel.js';
 
 const log = getLogger('agent:coding-flow');
 
@@ -53,7 +54,16 @@ export async function runCodingFlow(
   // ══════════════════════════════════════════════════════════════════════
 
   log.info('Phase 1: Planner — analyzing task');
-  const planSpinner = ora({ text: chalk.gray('Planning...'), color: 'gray', stream: process.stdout }).start();
+  // ora writes raw ANSI cursor-movement bytes straight to process.stdout —
+  // safe only when nothing else owns the terminal's live region. Once a
+  // persistent App is mounted (hasSink() true), Ink owns that region and a
+  // second thing moving the cursor on its own would tear the frame. Skip
+  // the spinner visual entirely in that mode; planning is fast enough that
+  // silence here doesn't leave a dead-feeling gap (unlike the Thinking...
+  // spinner in generator.ts, which covers a much longer LLM round-trip).
+  const planSpinner = hasSink()
+    ? { stop: () => {} }
+    : ora({ text: chalk.gray('Planning...'), color: 'gray', stream: process.stdout }).start();
 
   let plan: TaskPlan;
   // Skip planner for short tasks or continuation signals — the task itself
@@ -290,13 +300,11 @@ export async function runCodingFlow(
 
   if (userRejected) { log.info('Agent ended — user rejected'); return { responseLength: 0 }; }
 
-  if (finalAssistantText) {
-    process.stdout.write('\n');
-  } else {
+  if (!finalAssistantText) {
     const summaryMsg = lang === 'zh'
       ? '所有步骤已执行完成。请查看上述工具输出确认结果。'
       : 'All steps executed. Review the tool outputs above for results.';
-    process.stdout.write(chalk.green('\n' + summaryMsg + '\n'));
+    chWrite(chalk.green('\n' + summaryMsg + '\n'));
   }
 
   log.info('Coding flow complete', { planSteps: plan.steps.length });

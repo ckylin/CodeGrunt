@@ -12,6 +12,7 @@ import { getLogger } from '../../observability/logger.js';
 import { detectSystemLanguage } from '../../../utils/locale.js';
 import { createHash } from 'crypto';
 import { platform } from 'os';
+import { write as chWrite } from '../../../cli/ink/output-channel.js';
 
 const log = getLogger('stage:prepare-context');
 
@@ -173,7 +174,7 @@ export class PrepareContextStage implements Stage {
         curr: promptHash,
         reason: ctx.systemPromptOverride ? 'skill override' : 'content change',
       });
-      process.stdout.write(
+      chWrite(
         `\x1b[33m  [cache] system prompt changed (${this.basePromptHash}→${promptHash}) — prefix cache invalidated\x1b[0m\n`
       );
       this.basePromptHash = promptHash;
