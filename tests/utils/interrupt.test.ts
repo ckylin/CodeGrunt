@@ -169,4 +169,51 @@ describe('createInterruptController', () => {
     const ctrl = createInterruptController();
     expect(() => ctrl.cleanup()).not.toThrow();
   });
+
+  // ── manageStdin: false (persistent-App REPL mode) ──────────────────────
+  describe('manageStdin: false', () => {
+    it('does not touch stdin at all, even when stdin is a TTY', () => {
+      const fakeStdin = makeFakeStdin({ isTTY: true, isRaw: false });
+      Object.defineProperty(process, 'stdin', { value: fakeStdin, configurable: true });
+      const ctrl = createInterruptController({ manageStdin: false });
+      expect(fakeStdin.setRawMode).not.toHaveBeenCalled();
+      expect(fakeStdin.resume).not.toHaveBeenCalled();
+      ctrl.cleanup();
+      expect(fakeStdin.pause).not.toHaveBeenCalled();
+    });
+
+    it('a raw ESC byte written to stdin does NOT abort — nothing here is listening for it', () => {
+      const fakeStdin = makeFakeStdin({ isTTY: true });
+      Object.defineProperty(process, 'stdin', { value: fakeStdin, configurable: true });
+      const ctrl = createInterruptController({ manageStdin: false });
+      fakeStdin.emit('data', '\x1b');
+      expect(ctrl.signal.aborted).toBe(false);
+      ctrl.cleanup();
+    });
+
+    it('SIGINT still aborts — process-level signal handling is unaffected by manageStdin', () => {
+      Object.defineProperty(process, 'stdin', { value: makeFakeStdin({ isTTY: true }), configurable: true });
+      const ctrl = createInterruptController({ manageStdin: false });
+      process.emit('SIGINT');
+      expect(ctrl.signal.aborted).toBe(true);
+      ctrl.cleanup();
+    });
+
+    it("calling the returned abort() directly triggers the same abort path a keypress would", () => {
+      Object.defineProperty(process, 'stdin', { value: makeFakeStdin({ isTTY: true }), configurable: true });
+      const ctrl = createInterruptController({ manageStdin: false });
+      expect(ctrl.signal.aborted).toBe(false);
+      ctrl.abort();
+      expect(ctrl.signal.aborted).toBe(true);
+      ctrl.cleanup();
+    });
+  });
+
+  it('manageStdin: true (default) also exposes abort() for manual triggering', () => {
+    Object.defineProperty(process, 'stdin', { value: makeFakeStdin({ isTTY: false }), configurable: true });
+    const ctrl = createInterruptController();
+    ctrl.abort();
+    expect(ctrl.signal.aborted).toBe(true);
+    ctrl.cleanup();
+  });
 });
