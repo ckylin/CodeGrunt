@@ -11,6 +11,7 @@
     "build": "tsc",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
+    "bench": "tsx scripts/bench.ts",
     "start": "node dist/cli/index.js",
     "prepublishOnly": "npm run build"
   },
