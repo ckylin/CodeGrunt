@@ -172,8 +172,11 @@ export class MarkdownRenderer {
 
   private formatCodeBlock(code: string): string {
     const lines = code.split('\n');
-    const maxCols = Math.min(process.stdout.columns || 80, 100);
-    const innerW = Math.min(maxCols - 2, 60);
+    // Use the full terminal width (minus box borders/padding) instead of a
+    // fixed 60-col cap — code lines get WRAPPED below, never truncated, so a
+    // narrow fixed width would just mean more wrapped lines, not lost content.
+    const maxCols = process.stdout.columns || 80;
+    const innerW = Math.max(20, maxCols - 2);
 
     // Top border with language label
     const langLabel = this.codeBlockLang
@@ -185,26 +188,36 @@ export class MarkdownRenderer {
 
     for (const codeLine of lines) {
       const trimmed = codeLine.trimEnd();
-      const truncated = this.truncateToWidth(trimmed, innerW - 2);
-      const padded = truncated + ' '.repeat(Math.max(0, innerW - 2 - stringWidth(truncated)));
-      out += muted('│ ') + chalk.white(padded) + muted(' │') + '\n';
+      for (const wrapped of this.wrapToWidth(trimmed, innerW - 2)) {
+        const padded = wrapped + ' '.repeat(Math.max(0, innerW - 2 - stringWidth(wrapped)));
+        out += muted('│ ') + chalk.white(padded) + muted(' │') + '\n';
+      }
     }
 
     out += muted('╰' + '─'.repeat(innerW) + '╯');
     return out;
   }
 
-  private truncateToWidth(s: string, maxW: number): string {
-    if (stringWidth(s) <= maxW) return s;
-    let out = '';
+  /** Splits a line into chunks that each fit within maxW display columns,
+   *  preserving all content (no truncation) — always returns at least one
+   *  chunk (empty string for an empty line). */
+  private wrapToWidth(s: string, maxW: number): string[] {
+    if (s.length === 0) return [''];
+    const chunks: string[] = [];
+    let cur = '';
     let w = 0;
     for (const ch of s) {
       const cw = stringWidth(ch);
-      if (w + cw > maxW - 1) break;
-      out += ch;
+      if (w + cw > maxW && cur.length > 0) {
+        chunks.push(cur);
+        cur = '';
+        w = 0;
+      }
+      cur += ch;
       w += cw;
     }
-    return out + '…';
+    if (cur.length > 0) chunks.push(cur);
+    return chunks.length > 0 ? chunks : [''];
   }
 
   private isTableRow(line: string): boolean {

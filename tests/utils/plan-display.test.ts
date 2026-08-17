@@ -49,18 +49,18 @@ describe('renderPlanTree', () => {
     expect(lines[3]).toContain('└─');
   });
 
-  it('marks a done step with the √ icon', () => {
+  it('marks a done step with the ✓ icon', () => {
     const plan = makePlan(['Only step']);
     const statuses: PlanStepStatus[] = ['done'];
     const output = stripAnsi(renderPlanTree(plan, statuses));
-    expect(output).toContain('√');
+    expect(output).toContain('✓');
   });
 
-  it('marks a failed step with the × icon', () => {
+  it('marks a failed step with the ✗ icon', () => {
     const plan = makePlan(['Only step']);
     const statuses: PlanStepStatus[] = ['failed'];
     const output = stripAnsi(renderPlanTree(plan, statuses));
-    expect(output).toContain('×');
+    expect(output).toContain('✗');
   });
 
   it('marks an in-progress step with the → icon', () => {
@@ -75,12 +75,12 @@ describe('renderPlanTree', () => {
     const statuses: PlanStepStatus[] = ['done', 'in_progress', 'pending', 'failed'];
     const lines = stripAnsi(renderPlanTree(plan, statuses)).split('\n');
     // lines[0] is the header; steps start at lines[1]
-    expect(lines[1]).toContain('√');
+    expect(lines[1]).toContain('✓');
     expect(lines[1]).toContain('Done step');
     expect(lines[2]).toContain('→');
     expect(lines[2]).toContain('Running step');
     expect(lines[3]).toContain('Waiting step');
-    expect(lines[4]).toContain('×');
+    expect(lines[4]).toContain('✗');
     expect(lines[4]).toContain('Failed step');
   });
 

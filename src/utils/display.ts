@@ -73,11 +73,13 @@ export function printStepProgress(stepIndex: number, totalSteps: number, descrip
 //   'failed'      — max retries exhausted and user rejected continuing
 export type PlanStepStatus = 'pending' | 'in_progress' | 'done' | 'failed';
 
+// Matches the ✓/✗ glyphs used by the tool-execution spinner (tool-spinner.ts)
+// so "done"/"failed" reads as the same concept everywhere in the UI.
 const STEP_ICONS: Record<PlanStepStatus, string> = {
   pending: ' ',
   in_progress: '→',
-  done: '√',
-  failed: '×',
+  done: '✓',
+  failed: '✗',
 };
 
 function stepIconColor(status: PlanStepStatus, icon: string): string {

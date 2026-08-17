@@ -7,6 +7,10 @@ import { ACCENT } from '../../utils/constants.js';
 import { Dropdown } from './Dropdown.js';
 import { createHistoryController, saveHistoryEntry } from './useHistory.js';
 import { getAutocompleteItems, findAtTokenAtCursor } from './useAutocomplete.js';
+import {
+  processPasteChunk, flattenPastedText, INITIAL_PASTE_STATE,
+  ENABLE_BRACKETED_PASTE, DISABLE_BRACKETED_PASTE,
+} from './paste.js';
 import type { PromptInputProps } from './types.js';
 
 function detectContextFile(cwd: string): string | null {
@@ -41,6 +45,22 @@ export function PromptInput({
   const cursorRef = useRef(0);
   const lastCtrlCRef = useRef(0);
   const suppressDropdownRef = useRef(false);
+  // Bracketed-paste assembly state — see paste.ts for why this exists (a
+  // multi-line paste split across stdin chunks could otherwise submit early
+  // on an embedded newline). Held in a ref, not state: it's pure plumbing
+  // for a single event handler pass and never needs to trigger a re-render.
+  const pasteStateRef = useRef(INITIAL_PASTE_STATE);
+
+  // Tell the terminal to wrap pastes in \x1b[200~ / \x1b[201~ markers so
+  // multi-line paste content never gets misread as an Enter keypress.
+  // Symmetric disable on unmount — PromptInput remounts fresh every turn
+  // (readMultilineInput renders a new tree each call), and paste mode is a
+  // terminal-wide toggle that must not stay on while nothing is listening
+  // for the markers (e.g. mid agent-run, when this component is unmounted).
+  useEffect(() => {
+    process.stdout.write(ENABLE_BRACKETED_PASTE);
+    return () => { process.stdout.write(DISABLE_BRACKETED_PASTE); };
+  }, []);
 
   const apply = (nextInput: string, nextCursor: number) => {
     inputRef.current = nextInput;
@@ -69,8 +89,15 @@ export function PromptInput({
     if (selected.kind === 'file') {
       const match = findAtTokenAtCursor(inputRef.current, cursorRef.current);
       if (match) {
-        const next = inputRef.current.slice(0, match.start) + selected.value + inputRef.current.slice(match.end);
-        apply(next, match.start + selected.value.length);
+        // A directory suggestion ends in '/' — the user is meant to keep typing
+        // to narrow down into it, so don't shove a space in their way. A file
+        // suggestion is a complete token — append a trailing space (unless one
+        // is already there) so the next typed character doesn't run into it.
+        const isDir = selected.value.endsWith('/');
+        const alreadySpaced = inputRef.current[match.end] === ' ';
+        const insertion = (!isDir && !alreadySpaced) ? selected.value + ' ' : selected.value;
+        const next = inputRef.current.slice(0, match.start) + insertion + inputRef.current.slice(match.end);
+        apply(next, match.start + insertion.length);
         return;
       }
     }
@@ -80,6 +107,25 @@ export function PromptInput({
   useInput((char, key) => {
     const cur = cursorRef.current;
     const inp = inputRef.current;
+
+    // ── Bracketed paste ──────────────────────────────────────────────────
+    // Must run before any other handling: a paste containing an embedded
+    // newline arrives as a chunk that key.return would otherwise treat as
+    // Enter (see paste.ts for the full explanation). Once inside an active
+    // paste, EVERY chunk is paste content until the end marker shows up —
+    // including chunks that would otherwise look like arrow keys or Ctrl+C,
+    // since those byte sequences can legitimately occur inside pasted text.
+    if (pasteStateRef.current.active || char.includes('[200~')) {
+      const result = processPasteChunk(pasteStateRef.current, char);
+      pasteStateRef.current = result.state;
+      if (result.consumed) {
+        if (result.insertText !== undefined) {
+          const flat = flattenPastedText(result.insertText);
+          apply(inp.slice(0, cur) + flat + inp.slice(cur), cur + flat.length);
+        }
+        return;
+      }
+    }
 
     // Any key other than up/down means the user is actively editing again —
     // stop suppressing the dropdown so '@'/'/' autocomplete works normally.
@@ -150,8 +196,15 @@ export function PromptInput({
       return;
     }
 
-    // Escape — close dropdown or clear input
+    // Escape — dismiss the dropdown first (without touching what's typed),
+    // and only clear the whole input if there's no dropdown open. Wiping a
+    // half-typed message just to back out of an autocomplete menu is exactly
+    // the kind of surprise that makes a slash-command flow feel unreliable.
     if (key.escape) {
+      if (dropdownVisible) {
+        setSuppress(true);
+        return;
+      }
       apply('', 0);
       return;
     }

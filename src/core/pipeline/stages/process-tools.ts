@@ -12,7 +12,7 @@ import { executeToolCall, repairToolArgs } from './process-tools-helpers.js';
 import { getLogger } from '../../observability/logger.js';
 import { getDefaultEventBus, type ToolCallEvent, type ToolResultEvent } from '../../events/bus.js';
 import { getDefaultMetrics } from '../../observability/metrics.js';
-import { createToolSpinner, type ToolSpinner } from '../../../utils/tool-spinner.js';
+import { createToolSpinner, printToolOutputPreview, type ToolSpinner } from '../../../utils/tool-spinner.js';
 import { getHookRegistry } from '../../hooks/registry.js';
 import { runDiagnostics, formatDiagnostics } from '../../lsp/checker.js';
 
@@ -126,6 +126,18 @@ export class ProcessToolCallsStage implements Stage {
 
       // ── Stop spinner, show result with duration ─────────────────────
       spinner.done(result.success, execDurationMs, result.error);
+
+      // Show a capped tail preview of the actual output for tools whose
+      // stdout IS the point (execute_shell — build logs, test runs, git
+      // diff, ...). Previously the full output only ever reached the LLM's
+      // message history; the terminal showed nothing past the spinner line,
+      // so the user had no way to tell what a command actually did without
+      // waiting for the model to summarize it.
+      // Also preview on failure — the spinner's error line is truncated to
+      // 80 chars, which is rarely enough to see why a command actually failed.
+      if (tc.function.name === 'execute_shell') {
+        printToolOutputPreview(result.output);
+      }
 
       // Emit result event
       const resultEvent: ToolResultEvent = {
