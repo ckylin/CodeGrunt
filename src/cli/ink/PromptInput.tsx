@@ -1,6 +1,7 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { Box, Text, useInput } from 'ink';
 import chalk from 'chalk';
+import stringWidth from 'string-width';
 import { accessSync } from 'fs';
 import { join } from 'path';
 import { ACCENT } from '../../utils/constants.js';
@@ -8,7 +9,7 @@ import { Dropdown } from './Dropdown.js';
 import { createHistoryController, saveHistoryEntry } from './useHistory.js';
 import { getAutocompleteItems, findAtTokenAtCursor } from './useAutocomplete.js';
 import {
-  processPasteChunk, flattenPastedText, INITIAL_PASTE_STATE,
+  processPasteChunk, normalizePastedText, INITIAL_PASTE_STATE,
   ENABLE_BRACKETED_PASTE, DISABLE_BRACKETED_PASTE,
 } from './paste.js';
 import type { PromptInputProps } from './types.js';
@@ -27,6 +28,8 @@ export function PromptInput({
   activeSkill,
   showMeta,
   onSubmit,
+  busy = false,
+  onCancelBusy,
 }: PromptInputProps): React.ReactElement {
   const [input, setInput] = useState('');
   const [cursor, setCursor] = useState(0);
@@ -108,6 +111,17 @@ export function PromptInput({
     const cur = cursorRef.current;
     const inp = inputRef.current;
 
+    // While busy (an agent turn is running), the input stays mounted and
+    // visible (dimmed — see the render below) instead of unmounting, but it
+    // does not accept new submissions or edits: there's no message queue
+    // for a second task to wait behind the first, so accepting a typed-ahead
+    // message here would just silently discard it. Esc/Ctrl+C are the only
+    // live keys — they interrupt the RUNNING turn.
+    if (busy) {
+      if (key.escape || (key.ctrl && char === 'c')) onCancelBusy?.();
+      return;
+    }
+
     // ── Bracketed paste ──────────────────────────────────────────────────
     // Must run before any other handling: a paste containing an embedded
     // newline arrives as a chunk that key.return would otherwise treat as
@@ -120,8 +134,8 @@ export function PromptInput({
       pasteStateRef.current = result.state;
       if (result.consumed) {
         if (result.insertText !== undefined) {
-          const flat = flattenPastedText(result.insertText);
-          apply(inp.slice(0, cur) + flat + inp.slice(cur), cur + flat.length);
+          const normalized = normalizePastedText(result.insertText);
+          apply(inp.slice(0, cur) + normalized + inp.slice(cur), cur + normalized.length);
         }
         return;
       }
@@ -209,7 +223,7 @@ export function PromptInput({
       return;
     }
 
-    // Enter — accept dropdown or submit
+    // Enter — accept dropdown, insert a newline (backslash-continuation), or submit
     if (key.return) {
       if (dropdownVisible && dropdownItems.length > 0) {
         const selected = dropdownItems[dropdownIndex];
@@ -223,6 +237,20 @@ export function PromptInput({
             acceptSelection(selected);
           }
         }
+        return;
+      }
+
+      // Backslash-continuation, matching Aider/many REPLs: a line ending in
+      // '\' right before the cursor means "insert a newline, don't submit
+      // yet" rather than "send this message". The trailing backslash is
+      // removed so it never ends up as literal content in the sent message.
+      // Chosen over Shift+Enter because Shift+Enter has no universal,
+      // terminal-independent byte signal — Ink's own keypress parser can't
+      // reliably distinguish it from plain Enter without extra
+      // terminal-specific protocol support that only some emulators speak.
+      if (cur > 0 && inp[cur - 1] === '\\') {
+        const next = inp.slice(0, cur - 1) + '\n' + inp.slice(cur);
+        apply(next, cur);
         return;
       }
 
@@ -279,14 +307,32 @@ export function PromptInput({
   // independently by Ink's layout engine (squashTextNodes only merges children
   // of the same node). A single <Text> node is squashed into one text block,
   // so Ink wraps it correctly as a continuous stream.
-  const promptStyled = activeSkill
-    ? chalk.hex('#6C63FF').bold(promptStr)
-    : chalk.hex(ACCENT)(promptStr);
+  const dim = busy;
+  const promptStyled = dim
+    ? chalk.gray(promptStr)
+    : activeSkill
+      ? chalk.hex('#6C63FF').bold(promptStr)
+      : chalk.hex(ACCENT)(promptStr);
 
   const beforeCursor = input.slice(0, cursor);
   const cursorChar = input[cursor] ?? ' ';
   const afterCursor = input.slice(cursor + 1);
-  const inputLine = beforeCursor + chalk.inverse(cursorChar) + afterCursor;
+  // busy mode never shows an inverted cursor block — there's nothing to edit,
+  // and an inverted character on frozen text reads as "still interactive"
+  // when it isn't.
+  const styledMiddle = busy ? cursorChar : chalk.inverse(cursorChar);
+  const rawInputLine = beforeCursor + styledMiddle + afterCursor;
+  const inputLine = busy ? chalk.gray(rawInputLine) : rawInputLine;
+
+  // Continuation lines (from backslash-continuation newlines) are indented
+  // to align under the first line's text, not under the prompt glyph itself
+  // — lines up visually with where the text starts, same convention as
+  // most REPLs' multi-line prompts.
+  const continuationIndent = ' '.repeat(stringWidth(promptStr));
+  const displayLines = (promptStyled + inputLine).split('\n');
+  const renderedInput = displayLines
+    .map((line, i) => (i === 0 ? line : continuationIndent + line))
+    .join('\n');
 
   return (
     <Box flexDirection="column">
@@ -304,12 +350,14 @@ export function PromptInput({
       {exitHint && (
         <Text color="yellow">{'(Press Ctrl+C again within 2s to exit)'}</Text>
       )}
-      <Text>{promptStyled + inputLine}</Text>
-      <Dropdown
-        items={dropdownItems}
-        selectedIndex={dropdownIndex}
-        visible={dropdownVisible}
-      />
+      <Text>{renderedInput}</Text>
+      {!busy && (
+        <Dropdown
+          items={dropdownItems}
+          selectedIndex={dropdownIndex}
+          visible={dropdownVisible}
+        />
+      )}
     </Box>
   );
 }

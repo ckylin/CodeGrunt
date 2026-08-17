@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { processPasteChunk, flattenPastedText, INITIAL_PASTE_STATE } from '../../src/cli/ink/paste.js';
+import { processPasteChunk, normalizePastedText, INITIAL_PASTE_STATE } from '../../src/cli/ink/paste.js';
 
 describe('processPasteChunk', () => {
   it('passes through a chunk with no paste markers untouched', () => {
@@ -54,16 +54,20 @@ describe('processPasteChunk', () => {
   });
 });
 
-describe('flattenPastedText', () => {
-  it('collapses embedded newlines to spaces', () => {
-    expect(flattenPastedText('line one\nline two\nline three')).toBe('line one line two line three');
+describe('normalizePastedText', () => {
+  it('preserves embedded newlines as literal \\n (multi-line input is now supported)', () => {
+    expect(normalizePastedText('line one\nline two\nline three')).toBe('line one\nline two\nline three');
   });
 
-  it('collapses CRLF sequences to a single space, not two', () => {
-    expect(flattenPastedText('a\r\nb')).toBe('a b');
+  it('normalizes CRLF sequences to a single \\n, not two', () => {
+    expect(normalizePastedText('a\r\nb')).toBe('a\nb');
+  });
+
+  it('normalizes a lone CR to \\n', () => {
+    expect(normalizePastedText('a\rb')).toBe('a\nb');
   });
 
   it('leaves single-line pasted text unchanged', () => {
-    expect(flattenPastedText('just one line')).toBe('just one line');
+    expect(normalizePastedText('just one line')).toBe('just one line');
   });
 });

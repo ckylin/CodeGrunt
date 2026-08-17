@@ -71,13 +71,15 @@ export function processPasteChunk(state: PasteState, chunk: string): PasteChunkR
 }
 
 /**
- * Flatten pasted text to a single line. PromptInput is a single-line input
- * (no Shift+Enter / multi-line editing exists yet), so a pasted block that
- * contains real newlines is joined with spaces rather than inserting literal
- * '\n' bytes — that keeps today's cursor-is-a-string-index model correct and
- * avoids corrupting the newline-delimited history file (~/.codegrunt/history)
- * with embedded line breaks. Runs of CR/LF collapse to one space each.
+ * Normalizes a pasted block's line endings to plain '\n'. PromptInput now
+ * supports multi-line input (backslash-at-end-of-line + Enter), so a pasted
+ * block containing real newlines is inserted as literal '\n' bytes rather
+ * than flattened to spaces — pasting a stack trace or a multi-line code
+ * snippet now looks the way it looked when it was copied. CRLF/lone-CR
+ * sequences are normalized to '\n' so downstream code (history storage,
+ * cursor-is-a-string-index model) only ever has to handle one line-ending
+ * style regardless of what the source terminal/OS sent.
  */
-export function flattenPastedText(s: string): string {
-  return s.replace(/\r\n|\r|\n/g, ' ');
+export function normalizePastedText(s: string): string {
+  return s.replace(/\r\n|\r/g, '\n');
 }
