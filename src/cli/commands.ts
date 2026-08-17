@@ -28,6 +28,7 @@ import {
   forkBranch, switchToBranch, deleteBranch, visualizeBranchTree, getCheckpoint,
 } from '../core/session/branching.js';
 import { getSubagentCacheStats, clearSubagentCache } from '../core/agent/subagent.js';
+import { printPaged } from '../utils/pager.js';
 
 import { handleBranch, handleTree, handleSwitchBranch, handleSubagentCache } from './branch-commands.js';
 
@@ -68,6 +69,7 @@ export const BUILTIN_COMMANDS: CommandDescriptor[] = [
   { name: 'switch',  desc: 'Switch to a different branch: /switch <branch-id>' },
   { name: 'subagent-cache', desc: 'Show or clear the sub-agent result cache' },
   { name: 'effort',  desc: 'Set reasoning effort: low (flash) / medium (auto) / high (pro+thinking)' },
+  { name: 'theme',   desc: 'Set TUI color theme: dark (default) / light' },
 ];
 
 export type SlashCommandResult =
@@ -94,7 +96,7 @@ export async function handleSlashCommand(
 
   switch (cmd.toLowerCase()) {
     case 'help':
-      printHelp(config, skills);
+      await printHelp(config, skills);
       return { type: 'handled' };
 
     case 'clear':
@@ -132,6 +134,9 @@ export async function handleSlashCommand(
     case 'reasoning':
     case 'effort':
       return switchReasoningEffort(args, config);
+
+    case 'theme':
+      return switchTheme(args, config);
 
     case 'token':
     case 'apikey':
@@ -217,7 +222,7 @@ export async function handleSlashCommand(
 
 // ── /help ───────────────────────────────────────────────────────────────────
 
-function printHelp(config: CodeGruntConfig, skills: Skill[] = []): void {
+async function printHelp(config: CodeGruntConfig, skills: Skill[] = []): Promise<void> {
   const builtinLines = BUILTIN_COMMANDS.map(
     (c) => `  ${chalk.cyan('/' + c.name)}${' '.repeat(Math.max(1, 18 - c.name.length))}${chalk.gray(c.desc)}`
   ).join('\n');
@@ -228,7 +233,7 @@ function printHelp(config: CodeGruntConfig, skills: Skill[] = []): void {
         `  ${chalk.cyan('/' + s.name)}${' '.repeat(Math.max(1, 18 - s.name.length - 1))}${s.description ? chalk.gray(` — ${s.description}`) : chalk.gray(`(${s.source})`)}`
       ).join('\n') + '\n'
     : '';
-  console.log(`
+  await printPaged(`
 ${chalk.bold('Slash Commands')}
 
   ${chalk.cyan('/init')}              Analyze the codebase and generate a CODEGRUNT.md project guide
@@ -415,12 +420,17 @@ async function handleSessions(rest: string[], cwd: string): Promise<void> {
     return;
   }
 
-  console.log(`\n${chalk.bold('Saved Sessions')} ${chalk.gray(`(${sessions.length})`)}\n`);
-  for (const s of sessions) {
-    console.log(`  ${chalk.cyan(s.id.slice(0, 8))}  ${formatSessionEntry(s)}`);
-  }
-  console.log(`\n${chalk.gray('/resume <id>  to restore a session')}`);
-  console.log(chalk.gray('/sessions delete <id>  to remove a session\n'));
+  const lines = [
+    '',
+    `${chalk.bold('Saved Sessions')} ${chalk.gray(`(${sessions.length})`)}`,
+    '',
+    ...sessions.map((s) => `  ${chalk.cyan(s.id.slice(0, 8))}  ${formatSessionEntry(s)}`),
+    '',
+    chalk.gray('/resume <id>  to restore a session'),
+    chalk.gray('/sessions delete <id>  to remove a session'),
+    '',
+  ];
+  await printPaged(lines.join('\n'));
 }
 
 async function switchReasoningEffort(
@@ -459,6 +469,37 @@ async function switchReasoningEffort(
     type: 'config_changed',
     config: { ...config, reasoningEffort: selected as 'low' | 'medium' | 'high' },
   };
+}
+
+async function switchTheme(
+  arg: string,
+  config: CodeGruntConfig,
+): Promise<SlashCommandResult> {
+  const validThemes = ['dark', 'light'] as const;
+  const normalized = arg.toLowerCase();
+
+  if (normalized && validThemes.includes(normalized as (typeof validThemes)[number])) {
+    const theme = normalized as 'dark' | 'light';
+    console.log(chalk.green(`✓ Theme set to ${chalk.bold(theme)}`));
+    return { type: 'config_changed', config: { ...config, theme } };
+  }
+
+  const selected = await selectFromList(
+    'Select theme',
+    [
+      { value: 'dark', label: 'Dark', desc: 'Default — accent tuned for dark terminal backgrounds' },
+      { value: 'light', label: 'Light', desc: 'Darker accent/muted colors for light terminal backgrounds' },
+    ],
+    config.theme ?? 'dark',
+  );
+
+  if (!selected || selected === config.theme) {
+    console.log(chalk.gray('Theme unchanged.'));
+    return { type: 'handled' };
+  }
+
+  console.log(chalk.green(`✓ Theme set to ${chalk.bold(selected)}`));
+  return { type: 'config_changed', config: { ...config, theme: selected as 'dark' | 'light' } };
 }
 
 async function switchToken(
@@ -846,26 +887,29 @@ async function handleMemoryCommand(rest: string[], cwd: string): Promise<void> {
     listEntries(),
   ]);
 
+  const lines: string[] = [];
+
   if (summary) {
-    console.log(`\n${chalk.bold('Last Session Summary')}\n`);
-    console.log(chalk.gray(summary));
+    lines.push('', chalk.bold('Last Session Summary'), '', chalk.gray(summary));
   } else {
-    console.log(chalk.gray('\nNo session summary saved yet. Run /compact to create one.'));
+    lines.push('', chalk.gray('No session summary saved yet. Run /compact to create one.'));
   }
 
   if (entries.length > 0) {
-    console.log(`\n${chalk.bold('Memory Entries')}\n`);
+    lines.push('', chalk.bold('Memory Entries'), '');
     for (const e of entries) {
-      console.log(`  ${chalk.cyan(`[${e.id}]`)} ${chalk.bold(e.name)} ${chalk.gray(`(${e.type})`)}`);
-      console.log(`  ${chalk.gray(e.description)}`);
+      lines.push(`  ${chalk.cyan(`[${e.id}]`)} ${chalk.bold(e.name)} ${chalk.gray(`(${e.type})`)}`);
+      lines.push(`  ${chalk.gray(e.description)}`);
       const preview = e.body.length > 120 ? e.body.slice(0, 120) + '…' : e.body;
-      console.log(`  ${preview}\n`);
+      lines.push(`  ${preview}`, '');
     }
-    console.log(chalk.gray('  /memory delete <id>   to remove an entry'));
+    lines.push(chalk.gray('  /memory delete <id>   to remove an entry'));
   } else {
-    console.log(chalk.gray('\nNo memory entries. Ask the agent to remember something using memory_write.'));
+    lines.push('', chalk.gray('No memory entries. Ask the agent to remember something using memory_write.'));
   }
-  console.log('');
+  lines.push('');
+
+  await printPaged(lines.join('\n'));
 }
 
 // ── /skills ─────────────────────────────────────────────────────────────────

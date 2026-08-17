@@ -1,10 +1,9 @@
 import chalk from 'chalk';
 import type { TaskPlan, EvaluationResult, IntentResult } from '../core/pipeline/types.js';
-import { ACCENT } from './constants.js';
+import { ACCENT, muted } from './constants.js';
 import { formatErrorForDisplay } from '../core/errors.js';
 
 const blue  = (s: string) => chalk.hex(ACCENT)(s);
-const muted = chalk.gray;
 const danger  = chalk.red;
 const warning = chalk.yellow;
 

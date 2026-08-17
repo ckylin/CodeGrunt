@@ -29,6 +29,7 @@ import { getLogger } from '../core/observability/logger.js';
 import { getDefaultMetrics } from '../core/observability/metrics.js';
 import { getHookRegistry } from '../core/hooks/registry.js';
 import { writeCrashReport, type CrashReportContext } from '../core/observability/crash-report.js';
+import { applyTheme } from '../utils/constants.js';
 
 const log = getLogger('repl');
 
@@ -55,6 +56,8 @@ export async function startRepl(
     process.stderr.write('Error: interactive REPL requires a TTY. Use `codegrunt "<task>"` for non-interactive mode.\n');
     process.exit(1);
   }
+
+  applyTheme(initialConfig.theme ?? 'dark');
 
   const cwd = process.cwd();
   const budget = supportsReasoning(initialConfig.model) ? CONTEXT_BUDGET : CHAT_CONTEXT_BUDGET;
@@ -190,6 +193,7 @@ export async function startRepl(
       if (cmd.type === 'model_changed' || cmd.type === 'config_changed') {
         config = cmd.config;
         provider = new DeepSeekProvider(config);
+        applyTheme(config.theme ?? 'dark');
 
         // Sync search engine config to env so tools can read it without DI
         if (config.searchEngine) process.env['CODEGRUNT_SEARCH_ENGINE'] = config.searchEngine;
