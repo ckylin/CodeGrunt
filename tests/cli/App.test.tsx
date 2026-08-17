@@ -1,7 +1,14 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render } from 'ink-testing-library';
 import { mountApp } from '../../src/cli/ink/App.js';
-import { write, appendLiveText, commitLiveText, setLiveTool, hasSink } from '../../src/cli/ink/output-channel.js';
+import {
+  write, appendLiveText, commitLiveText, setLiveTool, hasSink, getPickerHandler,
+} from '../../src/cli/ink/output-channel.js';
+
+function stripAnsi(s: string): string {
+  // eslint-disable-next-line no-control-regex
+  return s.replace(/\x1b\[[0-9;]*m/g, '');
+}
 
 // See tests/cli/ListPicker.test.tsx for why this tick is necessary.
 function tick(): Promise<void> {
@@ -142,5 +149,97 @@ describe('mountApp', () => {
     app.onCancelBusy(handler);
     await tick();
     app.unmount();
+  });
+
+  describe('picker delegation (real bug regression coverage)', () => {
+    // Ink keys its render() instances by the stdout stream — a second
+    // independent render() call while this App is mounted would silently
+    // REPLACE this App's tree rather than coexist with it. App.tsx registers
+    // a picker handler on mount specifically so select.ts routes through
+    // THIS tree instead of calling render() itself. These tests drive that
+    // path end to end: register → open picker → select → resolve → prompt
+    // returns.
+
+    it('registers a picker handler on mount', async () => {
+      const app = mountApp({
+        cwd: '/tmp', model: 'm', gitBranch: null, skills: [], showMeta: false,
+        renderFn: render as any,
+      });
+      await tick();
+      expect(getPickerHandler()).not.toBeNull();
+      app.unmount();
+    });
+
+    it('unregisters the picker handler on unmount', async () => {
+      const app = mountApp({
+        cwd: '/tmp', model: 'm', gitBranch: null, skills: [], showMeta: false,
+        renderFn: render as any,
+      });
+      await tick();
+      app.unmount();
+      expect(getPickerHandler()).toBeNull();
+    });
+
+    it('renders the picker inside the SAME tree, replacing PromptInput, and resolves via a real keypress', async () => {
+      let captured: ReturnType<typeof render> | null = null;
+      const capturingRenderFn = ((node: any, opts: any) => {
+        captured = render(node, opts);
+        return captured;
+      }) as typeof render;
+
+      const app = mountApp({
+        cwd: '/tmp', model: 'm', gitBranch: null, skills: [], showMeta: false,
+        renderFn: capturingRenderFn,
+      });
+      await tick();
+
+      const handler = getPickerHandler();
+      expect(handler).not.toBeNull();
+
+      const items = [{ value: 'opt-a', label: 'Option A' }, { value: 'opt-b', label: 'Option B' }];
+      const resultPromise = handler!('Choose one', items);
+      await tick();
+
+      const frame = stripAnsi(captured!.lastFrame() ?? '');
+      expect(frame).toContain('Choose one');
+      expect(frame).toContain('Option A');
+      // PromptInput's own prompt glyph must NOT be visible while the picker is up.
+      expect(frame).not.toContain('>');
+
+      // Select the second option and confirm via Enter, same as a real user.
+      captured!.stdin.write('\x1b[B'); // down arrow
+      await tick();
+      captured!.stdin.write('\r');
+      await tick();
+
+      expect(await resultPromise).toBe('opt-b');
+      app.unmount();
+    });
+
+    it('the prompt reappears after the picker resolves', async () => {
+      let captured: ReturnType<typeof render> | null = null;
+      const capturingRenderFn = ((node: any, opts: any) => {
+        captured = render(node, opts);
+        return captured;
+      }) as typeof render;
+
+      const app = mountApp({
+        cwd: '/tmp', model: 'm', gitBranch: null, skills: [], showMeta: false,
+        renderFn: capturingRenderFn,
+      });
+      await tick();
+
+      const handler = getPickerHandler()!;
+      const resultPromise = handler('Choose one', [{ value: 'a', label: 'A' }]);
+      await tick();
+      captured!.stdin.write('\r'); // accept the only/highlighted item
+      await tick();
+      await resultPromise;
+      await tick();
+
+      const frame = stripAnsi(captured!.lastFrame() ?? '');
+      expect(frame).not.toContain('Choose one');
+      app.unmount();
+    });
   });
 });

@@ -2,9 +2,12 @@ import React, { useState, useEffect } from 'react';
 import { Box, Static, Text, render } from 'ink';
 import { PromptInput } from './PromptInput.js';
 import { StatusBar } from './StatusBar.js';
-import { registerSink, unregisterSink } from './output-channel.js';
-import type { LiveToolInfo, OutputChannelSink } from './output-channel.js';
-import type { InputResult, Skill } from './types.js';
+import { ListPicker } from './ListPicker.js';
+import {
+  registerSink, unregisterSink, registerPickerHandler, unregisterPickerHandler,
+} from './output-channel.js';
+import type { LiveToolInfo, OutputChannelSink, PickerHandler } from './output-channel.js';
+import type { InputResult, Skill, SelectorItem } from './types.js';
 
 // ── Imperative facade over the persistent Ink tree ───────────────────────
 // repl.ts's main loop is a plain imperative `while (true) { await ...; ... }`
@@ -44,6 +47,13 @@ interface RootBridge {
   setOnSubmit(handler: (result: InputResult) => void): void;
 }
 
+interface ActivePicker {
+  title: string;
+  items: SelectorItem[];
+  currentValue?: string;
+  resolve: (value: string | null) => void;
+}
+
 function App({ cwd, model, gitBranch, skills, activeSkill, showMeta, onReady }: AppProps): React.ReactElement {
   const [history, setHistory] = useState<HistoryEntry[]>([]);
   const [liveText, setLiveText] = useState('');
@@ -53,6 +63,7 @@ function App({ cwd, model, gitBranch, skills, activeSkill, showMeta, onReady }: 
   const [totalTokens, setTotalTokens] = useState(0);
   const [onCancelBusy, setOnCancelBusy] = useState<(() => void) | null>(null);
   const [onSubmitHandler, setOnSubmitHandler] = useState<((result: InputResult) => void) | null>(null);
+  const [activePicker, setActivePicker] = useState<ActivePicker | null>(null);
 
   useEffect(() => {
     const sink: OutputChannelSink = {
@@ -63,13 +74,26 @@ function App({ cwd, model, gitBranch, skills, activeSkill, showMeta, onReady }: 
       setLiveTool,
     };
     registerSink(sink);
+    // See output-channel.ts's "Picker delegation" doc — this is what makes
+    // /model, /resume, /restore etc. render their picker INSIDE this
+    // persistent tree instead of select.ts calling Ink's render() a second
+    // time (which would silently replace this whole tree, not coexist with it).
+    const pickerHandler: PickerHandler = (title, items, currentValue) => {
+      return new Promise((resolve) => {
+        setActivePicker({ title, items, currentValue, resolve });
+      });
+    };
+    registerPickerHandler(pickerHandler);
     onReady({
       setBusy: (busy) => setBusySince(busy ? Date.now() : null),
       setTotalTokens,
       setOnCancelBusy: (handler) => setOnCancelBusy(() => handler),
       setOnSubmit: (handler) => setOnSubmitHandler(() => handler),
     });
-    return () => unregisterSink();
+    return () => {
+      unregisterSink();
+      unregisterPickerHandler();
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -92,6 +116,11 @@ function App({ cwd, model, gitBranch, skills, activeSkill, showMeta, onReady }: 
     onSubmitHandler?.(result);
   };
 
+  const handlePickerSubmit = (value: string | null): void => {
+    activePicker?.resolve(value);
+    setActivePicker(null);
+  };
+
   return (
     <Box flexDirection="column">
       <Static items={history}>
@@ -108,16 +137,29 @@ function App({ cwd, model, gitBranch, skills, activeSkill, showMeta, onReady }: 
         busySince={busySince}
         elapsedSeconds={elapsedSeconds}
       />
-      <PromptInput
-        cwd={cwd}
-        model={model}
-        skills={skills}
-        activeSkill={activeSkill}
-        showMeta={showMeta}
-        busy={busySince !== null}
-        onCancelBusy={() => onCancelBusy?.()}
-        onSubmit={handleSubmit}
-      />
+      {activePicker ? (
+        // A picker (from /model, /resume, /restore, ...) replaces the
+        // prompt entirely while active — matches the pre-existing UX where
+        // selectFromList's own render() briefly took over the whole
+        // terminal instead of showing the prompt underneath.
+        <ListPicker
+          title={activePicker.title}
+          items={activePicker.items}
+          currentValue={activePicker.currentValue}
+          onSubmit={handlePickerSubmit}
+        />
+      ) : (
+        <PromptInput
+          cwd={cwd}
+          model={model}
+          skills={skills}
+          activeSkill={activeSkill}
+          showMeta={showMeta}
+          busy={busySince !== null}
+          onCancelBusy={() => onCancelBusy?.()}
+          onSubmit={handleSubmit}
+        />
+      )}
     </Box>
   );
 }
@@ -193,6 +235,7 @@ export function mountApp(props: MountAppOptions): AppHandle {
     },
     unmount(): void {
       unregisterSink();
+      unregisterPickerHandler();
       instance.unmount();
     },
   };

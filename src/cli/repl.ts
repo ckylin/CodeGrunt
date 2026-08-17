@@ -10,7 +10,9 @@ import { handleSlashCommand } from './commands.js';
 import { printBanner } from './banner.js';
 import { getMcpManager } from '../core/mcp/manager.js';
 import { getToolRegistry } from '../core/tools/registry.js';
-import { readMultilineInput } from './input.js';
+import { mountApp } from './ink/App.js';
+import { getCurrentGitBranch } from './ink/git-branch.js';
+import { write as chWrite } from './ink/output-channel.js';
 import { loadSkills } from './skills.js';
 import { saveConfig, supportsReasoning, CONTEXT_BUDGET, CHAT_CONTEXT_BUDGET } from '../config.js';
 import { loadSessionSummary, readEntries } from '../core/memory/store.js';
@@ -30,6 +32,7 @@ import { getDefaultMetrics } from '../core/observability/metrics.js';
 import { getHookRegistry } from '../core/hooks/registry.js';
 import { writeCrashReport, type CrashReportContext } from '../core/observability/crash-report.js';
 import { applyTheme } from '../utils/constants.js';
+import { getSessionUsage } from '../core/usage.js';
 
 const log = getLogger('repl');
 
@@ -68,6 +71,13 @@ export async function startRepl(
   // Sync search engine config to env so tools can read it without DI
   if (initialConfig.searchEngine) process.env['CODEGRUNT_SEARCH_ENGINE'] = initialConfig.searchEngine;
   if (initialConfig.searxngUrl)   process.env['CODEGRUNT_SEARXNG_URL'] = initialConfig.searxngUrl;
+
+  // ── Pre-mount setup ──────────────────────────────────────────────────────
+  // Everything in this section writes directly to stdout (not through
+  // output-channel.ts) and that's correct: the persistent App hasn't
+  // mounted yet, so there's no live region to corrupt. Once mountApp() is
+  // called below, every subsequent write in this function goes through
+  // chWrite() instead.
 
   // Connect MCP servers from ~/.codegrunt/mcp.json, register their tools
   const mcpManager = getMcpManager();
@@ -115,40 +125,61 @@ export async function startRepl(
   let habitState: HabitState = createInitialHabitState();
 
   const metrics = getDefaultMetrics();
-
-  // SIGINT fires only during agent runs (Ink intercepts Ctrl+C during input).
-  // When the interrupt controller is active the agent handles abort itself;
-  // once it's gone we just exit cleanly.
-  process.on('SIGINT', () => {
-    if (getActiveInterruptCount() > 0) return; // let interrupt controller handle it
-    process.stdout.write(chalk.gray('\nGoodbye.\n'));
-    if (process.env.CODEGRUNT_TELEMETRY === '1') metrics.printSummary();
-    process.exit(0);
-  });
+  const gitBranch = await getCurrentGitBranch(cwd);
 
   printBanner(config.model);
 
+  // ── Mount the persistent App ─────────────────────────────────────────────
+  // From here on, the input box stays mounted for the entire session — it no
+  // longer unmounts while the agent runs (see output-channel.ts's module doc
+  // for why that used to be necessary). All further terminal output in this
+  // function goes through chWrite()/app.set*() instead of raw stdout writes.
+  const app = mountApp({
+    cwd,
+    model: config.model,
+    gitBranch,
+    skills,
+    showMeta: true,
+  });
+
+  // Points at the InterruptController for whichever turn is currently
+  // running, so PromptInput's Esc/Ctrl+C-while-busy (reported via
+  // onCancelBusy) aborts the RIGHT turn. Null while idle between turns.
+  let activeInterrupt: ReturnType<typeof createInterruptController> | null = null;
+  app.onCancelBusy(() => activeInterrupt?.abort());
+
+  function exitRepl(message: string): never {
+    app.unmount();
+    console.log(chalk.gray(message));
+    if (process.env.CODEGRUNT_TELEMETRY === '1') metrics.printSummary();
+    process.exit(0);
+  }
+
+  // SIGINT here means something external sent the signal while idle (no
+  // turn running — an active turn's Esc/Ctrl+C is handled by PromptInput's
+  // busy-mode key handling instead, via onCancelBusy above). Unmount before
+  // printing so the final "Goodbye" doesn't land inside a live Ink region
+  // that's about to disappear anyway.
+  process.on('SIGINT', () => {
+    if (getActiveInterruptCount() > 0) return; // let interrupt controller handle it
+    exitRepl('\nGoodbye.');
+  });
+
   // ── Main REPL loop (iterative, not recursive — avoids stack growth) ──
   while (true) {
-    const result = await readMultilineInput(cwd, config.model, skills, undefined, true);
+    const result = await app.promptForInput();
 
     if (result.cancelled) {
       // PromptInput already handled the double-press guard; reaching here means
       // the user confirmed exit (second Ctrl+C within 2s).
-      console.log(chalk.gray('\nGoodbye.'));
-      if (process.env.CODEGRUNT_TELEMETRY === '1') metrics.printSummary();
-      process.exit(0);
+      exitRepl('\nGoodbye.');
     }
 
     const raw = result.text;
     if (!raw) continue;
 
     if (raw === 'exit' || raw === 'quit') {
-      console.log(chalk.gray('Goodbye.'));
-      if (process.env.CODEGRUNT_TELEMETRY === '1') {
-        metrics.printSummary();
-      }
-      process.exit(0);
+      exitRepl('Goodbye.');
     }
 
     // Slash commands — only if "/" is immediately followed by a letter (no space)
@@ -163,15 +194,15 @@ export async function startRepl(
           if (session) {
             context.setMessages(session.messages);
             currentSessionId = session.id;
-            process.stdout.write(chalk.gray(`  [session: resumed "${session.title.slice(0, 60)}" — ${session.messageCount} messages]\n\n`));
+            chWrite(chalk.gray(`  [session: resumed "${session.title.slice(0, 60)}" — ${session.messageCount} messages]\n`));
           } else {
-            process.stdout.write(chalk.yellow(`  Session "${targetId}" not found.\n\n`));
+            chWrite(chalk.yellow(`  Session "${targetId}" not found.\n`));
           }
         } else {
           // Interactive picker
           const sessions = await listSessions(cwd);
           if (sessions.length === 0) {
-            process.stdout.write(chalk.gray('  No saved sessions for this directory.\n\n'));
+            chWrite(chalk.gray('  No saved sessions for this directory.\n'));
           } else {
             const choices = sessions.map(s => ({ label: formatSessionEntry(s), value: s.id }));
             const picked = await selectFromList('Resume session:', choices);
@@ -180,7 +211,7 @@ export async function startRepl(
               if (session) {
                 context.setMessages(session.messages);
                 currentSessionId = session.id;
-                process.stdout.write(chalk.gray(`  [session: resumed "${session.title.slice(0, 60)}" — ${session.messageCount} messages]\n\n`));
+                chWrite(chalk.gray(`  [session: resumed "${session.title.slice(0, 60)}" — ${session.messageCount} messages]\n`));
               }
             }
           }
@@ -205,13 +236,13 @@ export async function startRepl(
 
         await saveConfig(config).catch(() => {});
         if (cmd.type === 'model_changed') {
-          console.log(chalk.gray(`  Active model: ${chalk.cyan(config.model)}\n`));
+          chWrite(chalk.gray(`  Active model: ${chalk.cyan(config.model)}\n`));
         } else {
-          console.log(chalk.gray('  Configuration applied.\n'));
+          chWrite(chalk.gray('  Configuration applied.\n'));
         }
       } else if (cmd.type === 'skills_reload') {
         skills = await loadSkills(cwd);
-        console.log(chalk.gray('Skills reloaded.\n'));
+        chWrite(chalk.gray('Skills reloaded.\n'));
       }
       continue;
     }
@@ -220,7 +251,7 @@ export async function startRepl(
     const { expanded: task, refs } = await resolveAtReferences(raw, cwd);
     if (refs.length > 0) {
       const labels = refs.map((r) => chalk.cyan(r.raw)).join(', ');
-      process.stdout.write(chalk.gray(`  Injecting: ${labels}\n`));
+      chWrite(chalk.gray(`  Injecting: ${labels}\n`));
     }
 
     // ── UserPromptSubmit hook ─────────────────────────────────────────
@@ -230,16 +261,17 @@ export async function startRepl(
       cwd,
     });
     if (hookResult.action === 'block') {
-      process.stdout.write(chalk.yellow(`  [hook blocked prompt: ${hookResult.reason}]\n\n`));
+      chWrite(chalk.yellow(`  [hook blocked prompt: ${hookResult.reason}]\n`));
       continue;
     }
     const effectiveTask = hookResult.action === 'modify' && typeof hookResult.data['prompt'] === 'string'
       ? hookResult.data['prompt']
       : task;
 
-    const interrupt = createInterruptController();
+    const interrupt = createInterruptController({ manageStdin: false });
+    activeInterrupt = interrupt;
+    app.setBusy(true);
     try {
-      process.stdout.write('\n');
       await runAgentLoop({
         task: effectiveTask, cwd, config, provider, context, skills,
         language: systemLanguage,
@@ -274,9 +306,20 @@ export async function startRepl(
         } catch { /* non-critical */ }
       }
     } catch (err) {
+      // Clear busy state BEFORE printing anything below — printTypedError()
+      // writes directly to stderr (see the comment on printError/
+      // printTypedError in display.ts), which bypasses output-channel.ts
+      // entirely. That's only safe once the live region is idle; doing it
+      // here, ahead of the actual error output, guarantees that ordering.
+      // interrupt.cleanup() itself is NOT idempotent (activeCount-- runs
+      // unconditionally) — do NOT also call it in `finally` below, or the
+      // counter goes negative. app.setBusy(false) IS safe to call twice.
+      activeInterrupt = null;
+      app.setBusy(false);
+
       const errName = (err as Error)?.name;
       if (errName === 'AbortError' || errName === 'UserAbortError' || interrupt.signal.aborted) {
-        process.stdout.write(chalk.yellow('\nInterrupted.\n'));
+        chWrite(chalk.yellow('Interrupted.\n'));
       } else {
         printTypedError(err);
         log.error('Agent loop failed', { error: err instanceof Error ? err.message : String(err) });
@@ -284,6 +327,10 @@ export async function startRepl(
       }
     } finally {
       interrupt.cleanup();
+      activeInterrupt = null;
+      app.setBusy(false);
+      const usage = getSessionUsage();
+      app.setTotalTokens(usage.inputTokens + usage.outputTokens);
     }
   }
 }

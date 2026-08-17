@@ -26,6 +26,41 @@
 // App), so a single optional sink slot is simpler and makes "no sink
 // registered" trivially detectable.
 
+// ── Picker delegation ────────────────────────────────────────────────────
+// Ink keys its render() instances by the stdout stream (see instances.js in
+// the ink package) — a SECOND render() call against process.stdout reuses
+// the SAME underlying instance and replaces whatever tree was mounted, it
+// does not create an independent second tree. Once App.tsx mounts a
+// persistent tree for the whole REPL session, utils/select.ts's own
+// render(<ListPicker>) call (used by /model, /resume, /restore, /mcp, and
+// every other picker-based slash command) would silently tear down and
+// replace that persistent tree — not "conflict with" it, actually destroy
+// it. This registry lets the mounted App own picker rendering too: App
+// registers a handler on mount, select.ts calls it when present instead of
+// calling render() itself, and unregisters on unmount so setup.ts's wizard
+// (which runs before any App exists) and one-shot mode both keep working
+// exactly as before via the direct-render() fallback path in select.ts.
+
+export type PickerHandler = (
+  title: string,
+  items: Array<{ value: string; label: string; desc?: string; kind?: 'builtin' | 'skill' }>,
+  currentValue?: string,
+) => Promise<string | null>;
+
+let pickerHandler: PickerHandler | null = null;
+
+export function registerPickerHandler(handler: PickerHandler): void {
+  pickerHandler = handler;
+}
+
+export function unregisterPickerHandler(): void {
+  pickerHandler = null;
+}
+
+export function getPickerHandler(): PickerHandler | null {
+  return pickerHandler;
+}
+
 export interface LiveToolInfo {
   /** Tool name, e.g. "execute_shell". */
   name: string;
