@@ -2,6 +2,7 @@ import { readFile, writeFile } from 'fs/promises';
 import { existsSync } from 'fs';
 import { resolve } from 'path';
 import type { Tool, ToolResult } from '../../types.js';
+import { findExactOrLineEndingTolerant, conformLineEndings } from '../../utils/line-endings.js';
 
 export const editFileTool: Tool = {
   definition: {
@@ -50,19 +51,18 @@ export const editFileTool: Tool = {
     }
     const original = current;
 
-    if (!original.includes(oldString)) {
+    // Exact match first, falling back to a CRLF/LF-normalized match so a
+    // Windows file with \r\n line endings still matches an old_string the
+    // model reproduced with plain \n (see utils/line-endings.ts).
+    const match = findExactOrLineEndingTolerant(original, oldString);
+    if (match === null) {
       return {
         success: false,
         output: '',
         error: `old_string not found in ${filePath}. The string must match exactly including whitespace and indentation.`,
       };
     }
-
-    // Reject ambiguous edits — old_string must appear exactly once.
-    // Ref: utils/confirm.ts applyEdit for the same guard in the confirm path.
-    const firstIdx = original.indexOf(oldString);
-    const lastIdx = original.lastIndexOf(oldString);
-    if (firstIdx !== lastIdx) {
+    if (match === 'AMBIGUOUS') {
       return {
         success: false,
         output: '',
@@ -70,7 +70,8 @@ export const editFileTool: Tool = {
       };
     }
 
-    const updated = original.slice(0, firstIdx) + newString + original.slice(firstIdx + oldString.length);
+    const replacement = conformLineEndings(newString, match.matchedText);
+    const updated = original.slice(0, match.start) + replacement + original.slice(match.end);
     await writeFile(filePath, updated, 'utf-8');
     // Diff already shown in confirmation dialog; here we just confirm success
     return { success: true, output: `Edited ${filePath}` , confirmDurationMs: (args._confirmDurationMs as number) ?? 0 };

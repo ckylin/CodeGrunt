@@ -136,4 +136,37 @@ describe('createInterruptController', () => {
     expect(newlineWrites).toBe(1);
     ctrl.cleanup();
   });
+
+  // Windows regression coverage: some terminal contexts (piped stdin
+  // masquerading as a TTY, certain ConEmu/mintty setups) throw from
+  // setRawMode where POSIX terminals wouldn't. This must degrade to
+  // "Esc-to-cancel unavailable", not crash the agent turn.
+  it('does not throw when setRawMode(true) throws during setup', () => {
+    const fakeStdin = makeFakeStdin({ isTTY: true, isRaw: false });
+    fakeStdin.setRawMode = vi.fn(() => { throw new Error('raw mode not supported here'); });
+    Object.defineProperty(process, 'stdin', { value: fakeStdin, configurable: true });
+    expect(() => createInterruptController()).not.toThrow();
+  });
+
+  it('SIGINT abort still works even when raw-mode setup failed', () => {
+    const fakeStdin = makeFakeStdin({ isTTY: true, isRaw: false });
+    fakeStdin.setRawMode = vi.fn(() => { throw new Error('raw mode not supported here'); });
+    Object.defineProperty(process, 'stdin', { value: fakeStdin, configurable: true });
+    const ctrl = createInterruptController();
+    process.emit('SIGINT');
+    expect(ctrl.signal.aborted).toBe(true);
+    ctrl.cleanup();
+  });
+
+  it('does not throw when setRawMode(false) throws during cleanup', () => {
+    const fakeStdin = makeFakeStdin({ isTTY: true, isRaw: false });
+    let calls = 0;
+    fakeStdin.setRawMode = vi.fn(() => {
+      calls++;
+      if (calls > 1) throw new Error('cannot restore raw mode');
+    });
+    Object.defineProperty(process, 'stdin', { value: fakeStdin, configurable: true });
+    const ctrl = createInterruptController();
+    expect(() => ctrl.cleanup()).not.toThrow();
+  });
 });

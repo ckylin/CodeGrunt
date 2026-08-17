@@ -5,6 +5,7 @@ import chalk from 'chalk';
 import { selectFromList } from './select.js';
 import { renderAdaptiveDiff, formatDiffStats } from './diff-renderer.js';
 import { isDangerousShellCommand, isDangerousWritePath } from './danger.js';
+import { findExactOrLineEndingTolerant, conformLineEndings } from './line-endings.js';
 
 function relPath(filePath: string): string {
   const cwd = process.cwd();
@@ -135,12 +136,12 @@ export async function confirmYesNo(prompt: string): Promise<boolean> {
 }
 
 export function applyEdit(original: string, oldString: string, newString: string): string | null {
-  if (!original.includes(oldString)) return null;
-  // Reject ambiguous edits — old_string must appear exactly once so the replacement
-  // target is unambiguous. If it appears more than once, require the caller to
-  // provide more surrounding context to make the match unique.
-  const firstIdx = original.indexOf(oldString);
-  const lastIdx = original.lastIndexOf(oldString);
-  if (firstIdx !== lastIdx) return 'AMBIGUOUS';
-  return original.slice(0, firstIdx) + newString + original.slice(firstIdx + oldString.length);
+  // Tries an exact match first, falling back to a CRLF/LF-normalized match
+  // (see line-endings.ts) — this is what lets old_string match a Windows
+  // CRLF file when the model reproduced it with plain \n.
+  const match = findExactOrLineEndingTolerant(original, oldString);
+  if (match === null) return null;
+  if (match === 'AMBIGUOUS') return 'AMBIGUOUS';
+  const replacement = conformLineEndings(newString, match.matchedText);
+  return original.slice(0, match.start) + replacement + original.slice(match.end);
 }

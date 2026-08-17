@@ -46,10 +46,18 @@ export function createInterruptController(): InterruptController {
     if (str === '\x1b' || str === '\x03') abort();
   };
 
+  // setRawMode can throw in some Windows terminal contexts (e.g. piped
+  // stdin masquerading as a TTY, or certain ConEmu/mintty configurations)
+  // where POSIX terminals would simply support it — a throw here must not
+  // crash the whole agent turn just because Esc-to-cancel can't be wired up.
   if (canListenKeys) {
-    if (!wasRaw) stdin.setRawMode?.(true);
-    stdin.resume();
-    stdin.on('data', onData);
+    try {
+      if (!wasRaw) stdin.setRawMode?.(true);
+      stdin.resume();
+      stdin.on('data', onData);
+    } catch {
+      /* Esc-to-cancel unavailable this session; SIGINT (Ctrl+C) still works. */
+    }
   }
 
   return {
@@ -58,9 +66,13 @@ export function createInterruptController(): InterruptController {
       activeCount--;
       process.removeListener('SIGINT', sigintHandler);
       if (canListenKeys) {
-        stdin.removeListener('data', onData);
-        if (!wasRaw) stdin.setRawMode?.(false);
-        stdin.pause();
+        try {
+          stdin.removeListener('data', onData);
+          if (!wasRaw) stdin.setRawMode?.(false);
+          stdin.pause();
+        } catch {
+          /* best-effort restore — nothing further to do if this fails */
+        }
       }
     },
   };
