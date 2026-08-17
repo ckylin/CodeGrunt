@@ -28,7 +28,7 @@ const program = new Command();
 program
   .name('codegrunt')
   .description('AI-powered CLI coding assistant')
-  .version('0.1.2')
+  .version('0.1.3')
   .argument('[task]', 'One-shot task to execute (omit for interactive mode)')
   .option('-m, --model <model>', 'Model to use')
   .option('--max-tokens <n>', 'Max tokens per response', parseInt)

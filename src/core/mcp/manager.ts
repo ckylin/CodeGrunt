@@ -20,7 +20,7 @@ import type { Tool, ToolResult } from '../../types.js';
 
 const log = getLogger('mcp');
 
-const CLIENT_INFO = { name: 'codegrunt', version: '0.1.2' };
+const CLIENT_INFO = { name: 'codegrunt', version: '0.1.3' };
 const CONNECT_TIMEOUT_MS = 15_000;
 
 // ── MCP tool wrapper ──────────────────────────────────────────────────────
