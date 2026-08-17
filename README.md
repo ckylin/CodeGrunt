@@ -34,12 +34,13 @@ codegrunt "把 auth 模块重构为 async/await"
 - **⚡ 流式输出** — 实时 Token 流式传输，支持 Markdown 渲染和推理过程可见，终端体验流畅
 - **📎 @-引用** — 使用 `@file.ts`、`@src/` 或 `@https://example.com` 将文件内容、目录列表或网页内容直接注入提示词
 - **🎯 斜杠命令** — `/init` 自动生成项目指南、`/model` 切换模型、`/compact` 压缩对话历史、`/review` 审查变更、`/skills` 管理技能等
-- **🔒 默认安全** — 破坏性操作（写入/编辑/Shell）显示 diff 预览并要求用户确认后执行，支持「本次会话全部允许」和 workspace 级别权限覆盖
-- **🔧 技能系统** — 从 `.zip` 文件安装可复用的提示词模板，Intentor 自动按关键词匹配合适的 Skill，也支持子代理模式（只读执行）
+- **🔒 默认安全** — 破坏性操作（写入/编辑/Shell）显示 diff 预览并要求用户确认后执行，支持「本次会话全部允许」、信任模式（`/trust`）和 workspace 级别权限覆盖（`/permissions`）
+- **🔧 技能系统** — 从 `.zip` 文件安装可复用的提示词模板（`codegrunt skills add -f`）或 `/skills create` 创建，兼容 `.claude/skills/`，Intentor 自动按关键词匹配合适的 Skill，也支持子代理模式（只读执行）
 - **🧠 习惯学习** — 自动分析用户的语言偏好、回答详细程度、工具确认行为，并将学习结果持久化到记忆中以优化后续交互
 - **📸 自动快照** — 每次编码轮次后自动创建 side-git 快照，可通过 `/restore` 回滚
-- **💲 费用追踪** — 使用 `/cost` 和 `/balance` 命令实时查看会话 Token 用量和费用
-- **🎨 现代终端 UI** — 基于 Ink/React 的终端输入组件，支持方向键导航、历史记录、自动补全下拉菜单
+- **💲 费用追踪** — 使用 `/cost`、`/cache`、`/cost-report` 和 `/balance` 命令实时查看会话 Token 用量、缓存节省和费用
+- **🎨 现代终端 UI** — 基于 Ink/React 的常驻终端界面：输入组件支持方向键导航、历史记录、自动补全下拉菜单；状态栏显示模型 / Git 分支 / Token 用量；`/theme` 支持深色 / 浅色主题
+- **🪢 会话分支与恢复** — `/branch`、`/tree`、`/switch` 从任意历史轮次分叉会话；`/resume`、`/sessions`、`--resume` 持久化保存和恢复完整会话
 - **📋 结构化日志** — Logger v2 支持 JSONL 文件日志（`~/.codegrunt/logs/`）、Trace ID 跨会话关联、日志自动轮转（5 文件、每文件 5MB）
 - **🔌 钩子系统** — 支持用户自定义钩子脚本（Shell/JS），在提示提交、工具使用前后和停止时触发
 - **🔍 语言诊断** — 编辑后自动运行 TypeScript/Python/Go/Rust/ESLint 诊断并反馈结果
@@ -128,17 +129,35 @@ codegrunt "你的任务描述"
 | `/model` | 交互式切换模型（方向键选择器） |
 | `/model <id>` | 切换到指定模型（例如 `/model deepseek-v4-pro`） |
 | `/init` | 分析代码库并生成 `CODEGRUNT.md` 项目指南 |
-| `/index` | 构建代码符号索引，加速 `code_search` 工具 |
+| `/index` | 构建代码符号索引，加速 `code_search` 工具（`--semantic` 启用向量语义搜索） |
 | `/clear` | 清除对话上下文 |
-| `/compact` | 总结并压缩对话历史以节省 Token（块式分层压缩） |
+| `/compact` | 总结并压缩对话历史以节省 Token（分层块式压缩） |
 | `/review` | 审查本次会话的变更是否有逻辑问题 |
 | `/cost` | 显示会话 Token 使用量和预估费用（含缓存命中/未命中统计） |
+| `/cache` | 显示 DeepSeek 前缀缓存命中率与预估节省 |
+| `/cost-report` | 显示今日 / 本月聚合费用报告 |
 | `/balance` | 显示账户余额和用量（今日 / 本月） |
 | `/config` | 显示或修改配置设置 |
 | `/reasoning` / `/effort` | 设置 R1 模型的推理强度（low/medium/high） |
+| `/theme` | 切换终端主题（dark / light） |
+| `/token` / `/apikey` | 设置或更换 DeepSeek API 密钥 |
+| `/trust` | 设置信任模式：plan（只读）/ code（确认）/ auto（全部允许） |
+| `/status` | 显示会话状态、信任模式、缓存命中率和上下文大小 |
+| `/resume [id]` | 恢复之前的会话（可交互选择） |
+| `/sessions [delete <id>]` | 列出和管理已保存的会话 |
+| `/memory [delete <id>]` | 显示持久化记忆条目和上次会话摘要 |
+| `/hooks` | 列出 `~/.codegrunt/hooks/` 中已加载的钩子脚本 |
 | `/skills` | 列出和管理技能（创建、列表、安装） |
 | `/search-engine` | 切换 Web 搜索用的搜索引擎 |
+| `/baseurl [url]` | 设置自定义 DeepSeek API Base URL（镜像/代理） |
 | `/restore` | 从自动快照恢复工作状态 |
+| `/swebench <instance-id>` | 将会话 diff 导出为 SWE-bench 预测（JSONL） |
+| `/permissions` | 查看或设置每个工具的 workspace 权限（allow/deny/ask） |
+| `/mcp` | 管理 MCP 服务器：`/mcp list` \| `add` \| `remove` \| `search` |
+| `/branch <turn>` | 从历史轮次创建会话分支 |
+| `/tree` | 可视化会话分支树 |
+| `/switch <branch-id>` | 切换到另一个会话分支 |
+| `/subagent-cache [clear]` | 显示或清空子代理结果缓存 |
 
 ### @-引用
 
@@ -172,11 +191,16 @@ CodeGrunt 通过环境变量或 `~/.codegrunt/config.json` 文件配置。
 | `CODEGRUNT_TOP_P` | 核采样 (0-1) | `1` |
 | `CODEGRUNT_FREQUENCY_PENALTY` | 重复惩罚 (-2 到 2) | `0` |
 | `CODEGRUNT_PRESENCE_PENALTY` | 主题多样性惩罚 (-2 到 2) | `0` |
+| `CODEGRUNT_TRUST_MODE` | 信任模式：`plan` \| `code` \| `auto` | `code` |
+| `CODEGRUNT_SEARCH_ENGINE` | Web 搜索引擎：`mojeek` \| `searxng` \| `duckduckgo` | `mojeek` |
+| `CODEGRUNT_SEARXNG_URL` | 自托管 SearXNG 实例 URL（当引擎为 searxng 时） | — |
+| `CODEGRUNT_AUTO_THINKING` | 复杂任务自动启用思考（`1`/`true`） | `true` |
+| `CODEGRUNT_AUTO_COMPACT` | 达到容量时自动压缩上下文（`1`/`true`） | `true` |
+| `CODEGRUNT_CRASH_REPORT` | 崩溃时写入本地崩溃报告（`1`/`true`） | `false` |
+| `CODEGRUNT_THEME` | 终端主题：`dark` \| `light` | `dark` |
 | `CODEGRUNT_LOG_LEVEL` | 日志级别：`debug` \| `info` \| `warn` \| `error` | `info` |
 | `CODEGRUNT_LOG_FILE` | 设为 `0` 或 `false` 禁用文件日志 | 启用 |
 | `CODEGRUNT_VERBOSE` | 启用详细 stderr 输出 | 禁用 |
-| `CODEGRUNT_SEARCH_ENGINE` | Web 搜索引擎：`mojeek` \| `searxng` \| `duckduckgo` | `mojeek` |
-| `CODEGRUNT_SEARXNG_URL` | 自托管 SearXNG 实例 URL（当引擎为 searxng 时） | — |
 
 ### 配置文件 (`~/.codegrunt/config.json`)
 
@@ -184,12 +208,19 @@ CodeGrunt 通过环境变量或 `~/.codegrunt/config.json` 文件配置。
 {
   "apiKey": "sk-xxxxxxxx",
   "model": "deepseek-v4-pro",
+  "baseURL": "https://api.deepseek.com",
   "maxTokens": 8192,
   "temperature": 0.2,
   "reasoningEffort": "medium",
   "topP": 1,
   "frequencyPenalty": 0,
-  "presencePenalty": 0
+  "presencePenalty": 0,
+  "trustMode": "code",
+  "searchEngine": "mojeek",
+  "autoThinkingMode": true,
+  "autoCompact": true,
+  "crashReportOnError": false,
+  "theme": "dark"
 }
 ```
 

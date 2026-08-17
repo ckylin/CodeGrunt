@@ -19,9 +19,9 @@ npx vitest run tests/tools/read_file.test.ts
 
 CodeGrunt is a terminal-native agentic coding assistant using a **P/G/E (Planner / Generator / Evaluator) + Intentor** architecture powered by a Harness-style pipeline engine.
 
-- `src/cli/` — entry point, REPL loop, argument parsing, slash commands (`commands.ts`), branch commands (`branch-commands.ts`), skills, @-reference resolver, **Ink/React terminal UI** components
-- `src/core/agent/` — Intentor (intent + skill classification), Planner (task decomposition), Generator (pipeline-based execution), Evaluator (quality check + auto-refine), Subagent (`subagent.ts` — isolated sub-task execution, sync + concurrent; `subagent-cache.ts` — result cache by input hash), R1 Thought Harvester (`r1-harvester.ts` — recovers tool calls escaped into `reasoning_content`)
-- `src/core/pipeline/` — Harness-style pipeline engine (5 stages: prepare context → stream response → process tools → post-process), sharing a `PipelineContext`
+- `src/cli/` — entry point, REPL loop, argument parsing, slash commands (`commands.ts`), branch commands (`branch-commands.ts`), skills, @-reference resolver, **Ink/React terminal UI** (persistent `App.tsx` tree + `PromptInput`, `StatusBar`, `output-channel` sink, etc.)
+- `src/core/agent/` — Intentor (intent + skill classification), Planner (task decomposition), Generator (`generator.ts` — shared 4-stage pipeline runner), Evaluator (quality check + auto-refine), complexity router (`complexity.ts` — request classifier + thinking-mode router), Subagent (`subagent.ts` — isolated sub-task execution, sync + concurrent; `subagent-cache.ts` — result cache by input hash), R1 Thought Harvester (`r1-harvester.ts` — recovers tool calls escaped into `reasoning_content`)
+- `src/core/pipeline/` — Harness-style pipeline engine (4 stages: prepare context → stream response → process tools → post-process) sharing a `PipelineContext`; `stages/process-tools-helpers.ts` is a **helper module** (tool execution, confirm flow, trust mode, permissions), not a stage
 - `src/core/tools/` — 11 built-in tools: file read/write/edit, shell execution, directory listing, search, memory read/write (`memory.ts`), web search, code search, `agent_open` (sub-agent delegation). `ToolRegistry` manages registration internally
   - `read_file`: supports `start_line`/`end_line` params; 100KB limit (files >100KB return line count with instructions to use line range)
   - `execute_shell`: `timeout_ms` capped at 300s (5 min); reports captured bytes on timeout
@@ -29,9 +29,17 @@ CodeGrunt is a terminal-native agentic coding assistant using a **P/G/E (Planner
   - `list_directory`: default limit 500 entries, `max_entries` param up to 2000
   - `agent_open`: delegates a focused research question to an isolated sub-agent (see Subagent section below)
 - `src/core/context/` — append-only, cache-first context window management (token budget, soft-trim-from-end on emergency overflow only) and project guide loading
-- `src/core/session/` — session persistence (`store.ts`) and session branching (`branching.ts` — fork/switch/tree over per-turn checkpoints)
-- `src/core/events/` — typed EventBus for pipeline/tool/LLM lifecycle events
-- `src/core/observability/` — structured Logger (v2: file transport, trace IDs, log rotation) + lightweight Metrics (counters, timers, snapshots)
+- `src/core/session/` — session persistence (`store.ts` — JSONL at `~/.codegrunt/conv-sessions/`) and session branching (`branching.ts` — fork/switch/tree over per-turn checkpoints)
+- `src/core/events/` — typed EventBus for pipeline/tool/LLM lifecycle events (`bus.ts`)
+- `src/core/observability/` — structured Logger (v2: file transport, trace IDs, log rotation) + lightweight Metrics (counters, timers, snapshots) + opt-in local crash reports (`crash-report.ts`)
+- `src/core/memory/` — persistent memory store (`store.ts`) + habit learning (`habits.ts`)
+- `src/core/permissions/` — per-workspace tool permission overrides (`permissions.json`)
+- `src/core/snapshot/` — side-git auto-snapshots
+- `src/core/hooks/` — user-defined hook scripts
+- `src/core/lsp/` — post-edit language diagnostics
+- `src/core/mcp/` — Model Context Protocol clients (stdio / SSE / Streamable HTTP)
+- `src/core/index/` — code symbol index (+ TF-IDF semantic vectors via `embedder.ts`)
+- `src/core/swebench/` — SWE-bench prediction export
 - `src/core/usage.ts` — shared session/per-call token usage tracking (`addUsage`, `getSessionUsage`, `getLastCallUsage`); extracted from `loop.ts` to avoid circular imports between provider and pipeline stages
 - `src/providers/` — LLM provider adapters implementing a shared `LLMProvider` interface; includes exponential backoff retry (3 attempts, 1s→2s→4s) for 429/5xx errors
 - `src/utils/` — shared utilities (display, confirm, billing, markdown rendering, interrupt, interactive selector)
@@ -56,7 +64,11 @@ CodeGrunt is a terminal-native agentic coding assistant using a **P/G/E (Planner
 
 **Model branching**: `isReasonerModel()` detects R1 variants; `supportsReasoning()` matches V4/Pro models that emit `reasoning_content`. Context budgets: 100k tokens for reasoning models, 90k for chat models. `reasoning_content` is only sent back for the last assistant message (not full history) to reduce token cost.
 
-**Context compaction**: Triggers at 50% token budget (was 80%) or when non-system message count exceeds 30. Keeps 15 recent messages (was 6), summary token limit 1500 (was 512).
+**Model auto-routing** (`selectModelForTask`): for `deepseek-v4-*` models only. Non-coding/skill tasks and simple/≤60-char tasks route to `deepseek-v4-flash`; complex-coding signals route to `deepseek-v4-pro`; never routes to a reasoner model.
+
+**Thinking-mode router** (`src/core/agent/complexity.ts`): `classifyComplexity(task)` returns a `simple | medium | complex` tier. For code tasks: simple → force `thinking: 'disabled'`; complex → force `thinking: 'enabled'` when `config.autoThinkingMode` (default true); medium → untouched.
+
+**Context compaction**: the append-only `ContextManager` sets `needsCompact` at 70% of token budget or >40 non-system messages (warning at 95%; emergency soft-trim from the **end** only at 2× budget — never the prefix, protecting the prompt cache). `/compact` and auto-compact use hierarchical chunk summarization via `compact.ts`: keeps 15 recent messages intact, per-chunk summary ≤400 tokens, merged final summary ≤1500 tokens, run on the `deepseek-v4-flash` model.
 
 ## Sub-agent Execution (`src/core/agent/subagent.ts`)
 
@@ -85,7 +97,7 @@ interface LLMProvider {
 
 ## Pipeline Engine (`src/core/pipeline/`)
 
-Inspired by Harness CI/CD, each agent interaction is decomposed into 5 stages sharing a `PipelineContext`:
+Inspired by Harness CI/CD, each agent interaction is decomposed into **4 stages** (wired in `src/core/agent/generator.ts`) sharing a `PipelineContext`:
 
 | Stage | Responsibility |
 |---|---|
@@ -94,19 +106,26 @@ Inspired by Harness CI/CD, each agent interaction is decomposed into 5 stages sh
 | ProcessToolCalls | Parse tool calls, execute via executor, inject results |
 | PostProcess | Blind-write warnings, token stats, final output |
 
+`stages/process-tools-helpers.ts` is **not a stage** — it's a helper module implementing `executeToolCall()` (confirm flow, trust mode, workspace permissions, `repairToolArgs()` schema-aware JSON repair).
+
 ## Tool Confirmation Flow
 
 Destructive tools (`write_file`, `edit_file`, `execute_shell`) are handled in `src/core/pipeline/process-tools-helpers.ts`, which calls `confirmEdit()` in `src/utils/confirm.ts` to show a diff and prompt the user. Choosing "Yes for all" sets a session-level flag. On user rejection, the assistant message `tool_calls` array is trimmed to only the processed calls. `resetYesAll()` is called at the start of each new user turn.
 
 ## Skills System
 
-Skills are Markdown files with YAML frontmatter (`name`, `description`, `system`, and body content). They are loaded from `<cwd>/.codegrunt/skills/` (project) and `~/.codegrunt/skills/` (global), and installed from `.zip` archives via `/skills install`. A skill can define a `system` field to completely replace the default coding-assistant identity. Skills are auto-discovered by the Intentor via keyword overlap matching.
+Skills are Markdown files with YAML frontmatter (`name`, `description`, `system`, `mode: inline|subagent`, and body content). They are loaded from `<cwd>/.codegrunt/skills/` (project) and `.claude/skills/` (Claude Code-compatible, project) and `~/.codegrunt/skills/` (global), with priority `.codegrunt/skills/` > `.claude/skills/` > global. Installed from `.zip` archives via `codegrunt skills add -f <file.zip>` (or created with `/skills create <name>`). A skill can define a `system` field to completely replace the default coding-assistant identity. Skills are auto-discovered by the Intentor via keyword overlap matching.
 
 ## UI / Input
 
-**Ink/React components** (`src/cli/ink/`): `PromptInput.tsx` (main input with cursor, history, autocomplete dropdown), `Dropdown.tsx` (autocomplete overlay), `ListPicker.tsx` (arrow-key selector for model/config selection), `useAutocomplete.ts` (file/slash/skill completion), `useHistory.ts` (persistent command history).
+**Ink/React components** (`src/cli/ink/`): a persistent React tree (`App.tsx`) owns the terminal for the whole REPL session — `<Static>` history, live tool line, streaming text, `<StatusBar>` (`model · ⎇ branch · Nk tokens`; `{elapsed}s · Esc to cancel` while busy), plus `<PromptInput>`/`<ListPicker>`. Supporting modules:
+- `output-channel.ts` — output routing seam: no sink (one-shot) → straight to `process.stdout`; sink registered (REPL) → routed into Ink state (`write`, `appendLiveText`, `setLiveTextDirect`, `commitLiveText`, `discardLiveText`, `setLiveTool`) + a picker registry so `select.ts` pickers render inside the App tree
+- `PromptInput.tsx` — main input with cursor, history navigation, autocomplete dropdown, busy mode, Ctrl+C double-press cancel, bracketed paste
+- `Dropdown.tsx` — autocomplete overlay; `ListPicker.tsx` — arrow-key selector for model/config selection
+- `useAutocomplete.ts` — file/slash/skill completion; `useHistory.ts` — persistent command history
+- `git-branch.ts` — cached current git branch; `paste.ts` — bracketed-paste state machine
 
-**Legacy input** (`src/cli/input.ts`): Raw-mode terminal input with bottom border + hint line. The accent color throughout is `#4A90D9`. Both the inline dropdown and `selectFromList` use `❯` as the selected-item indicator.
+**Legacy input** (`src/cli/input.ts`): Raw-mode terminal input with bottom border + hint line. The accent color throughout is `#4A90D9` (dark theme) / `#1D5D96` (light theme) — see `src/utils/constants.ts` (`ACCENT`, `applyTheme`, `muted`). Both the inline dropdown and `selectFromList` use `❯` as the selected-item indicator. `/theme` switches between `dark` (default) and `light`.
 
 ## Logger v2 (`src/core/observability/logger.ts`)
 
@@ -130,6 +149,15 @@ Runtime config via env vars or `~/.codegrunt/config.json`:
 - `CODEGRUNT_TOP_P` — nucleus sampling (default: `1`)
 - `CODEGRUNT_FREQUENCY_PENALTY` — repetition penalty (default: `0`)
 - `CODEGRUNT_PRESENCE_PENALTY` — topic diversity penalty (default: `0`)
+- `CODEGRUNT_TRUST_MODE` — trust mode: `plan` | `code` | `auto` (default: `code`)
+- `CODEGRUNT_SEARCH_ENGINE` — web search engine: `mojeek` | `searxng` | `duckduckgo` (default: `mojeek`)
+- `CODEGRUNT_SEARXNG_URL` — self-hosted SearXNG instance URL
+- `CODEGRUNT_AUTO_THINKING` — auto-enable thinking on complex tasks (default: `true`)
+- `CODEGRUNT_AUTO_COMPACT` — auto-compact at capacity (default: `true`)
+- `CODEGRUNT_CRASH_REPORT` — write local crash reports (default: `false`)
+- `CODEGRUNT_THEME` — TUI theme: `dark` | `light` (default: `dark`)
+- `CODEGRUNT_TELEMETRY` — set to `1` for periodic metrics summaries
+- `CODEGRUNT_HIDE_TOOL_OUTPUT` — set to `1` to suppress tool output previews
 
 Config file is created on first run via the setup wizard (`src/cli/setup.ts`). Env vars take precedence over the config file.
 
@@ -144,9 +172,9 @@ Shipped in v0.1.3 — see `Docs/development-guide.md` roadmap for full context. 
 
 ## v0.6 additions (cache-first ContextManager, Schema-aware repair, R1 harvesting)
 
-Roadmap target: 缓存极致 + 成本透明 (see `CodeGrunt-迭代路线图.md` §12). Summary:
+Roadmap target: 缓存极致 + 成本透明 (see `docs/development-guide.md`). Summary:
 
-- **Append-only `ContextManager`** (`src/core/context/manager.ts`) — `checkCapacity()` no longer proactively splices messages to stay under budget; it only sets `needsCompact`/`nearCapacity` flags. Emergency trimming (`softTrimFromEnd()`) fires only once token count exceeds `budget × 2.0`, and trims from the **end** of the message list (`removeNewestGroup`), never the prefix — this protects the DeepSeek prompt cache. Routine compaction is otherwise user-triggered via `/compact`.
+- **Append-only `ContextManager`** (`src/core/context/manager.ts`) — `checkCapacity()` no longer proactively splices messages to stay under budget; it only sets `needsCompact`/`nearCapacity` flags. Emergency trimming (`softTrimFromEnd()`) fires only once token count exceeds `budget × 2.0`, and trims from the **end** of the message list, never the prefix — this protects the DeepSeek prompt cache. Routine compaction runs via `/compact` or auto-compact wired into `loop.ts` (`compact.ts` hierarchical chunk summarization on the flash model).
 - **`/cache` command** (`src/cli/commands.ts`) — `printCacheStats()` reports cache hit rate and estimated savings from `getSessionUsage()`.
 - **`/cost-report` command** — `printCostReport()` shows today/this-month usage with cache-derived savings estimate.
 - **`/effort` (`/reasoning`) command** — `switchReasoningEffort()` toggles R1 reasoning effort between low/medium/high per turn.
@@ -155,18 +183,30 @@ Roadmap target: 缓存极致 + 成本透明 (see `CodeGrunt-迭代路线图.md` 
 
 ## v0.7 additions (concurrent sub-agents, session branching)
 
-Roadmap target: 并发编排 + 会话分支 (see `CodeGrunt-迭代路线图.md` §12). Summary:
+Roadmap target: 并发编排 + 会话分支 (see `docs/development-guide.md`). Summary:
 
 - **Concurrent sub-agents** — see the "Concurrent execution (v0.7)" and "Lifecycle management" bullets in the Sub-agent Execution section above (`runSubagentsConcurrent()`, `subagent-cache.ts`).
 - **Session branching** (`src/core/session/branching.ts` + `src/cli/branch-commands.ts`) — a `BranchTree` persisted per-session at `~/.codegrunt/branches/<session-id>.branches.json` records a flat list of `Checkpoint`s (turn index, message count, summary) per `Branch`. `forkBranch()` creates a new branch pointing at a historical checkpoint on an existing branch; `switchToBranch()` returns the message count to restore to; `visualizeBranchTree()` renders an ASCII tree. Exposed via `/branch <turn-number>`, `/tree`, `/switch <branch-id>` (registered in `commands.ts`). `recordCheckpoint()` is called automatically after each turn in `repl.ts`. Covered by `tests/core/branching.test.ts` (21 cases).
+
+## v0.8 additions (persistent Ink TUI, themes, thinking routing, auto-compact, crash reports)
+
+Roadmap target: see `docs/development-guide.md`. Summary:
+
+- **Persistent Ink/React TUI** — the REPL now mounts a single persistent React tree (`src/cli/ink/App.tsx`) for the whole session; `output-channel.ts` routes all terminal output through it once a sink is registered (one-shot mode still writes straight to stdout). `StatusBar` shows `model · ⎇ branch · Nk tokens` and a busy readout. Pickers (`/model`, `/resume`, ...) render inside the App tree via the picker registry.
+- **`/theme` command** (`dark` default / `light`) — `applyTheme()` in `src/utils/constants.ts` swaps `ACCENT` (`#4A90D9` ↔ `#1D5D96`) and muted color. Semantic colors (red/green/yellow) are intentionally not theme-controlled.
+- **Auto thinking mode** (`complexity.ts` router) — `config.autoThinkingMode` (default true): complex coding tasks force `thinking: 'enabled'`, simple tasks force `thinking: 'disabled'`; medium untouched.
+- **Auto-compact** — `maybeAutoCompact()` in `loop.ts` runs at the start of each turn when `context.needsCompact` (70% budget / 40+ messages) and `config.autoCompact` (default true), using the hierarchical chunk summarizer in `compact.ts` on the flash model.
+- **Local crash reports** (`src/core/observability/crash-report.ts`) — opt-in (`crashReportOnError` / `CODEGRUNT_CRASH_REPORT`): JSON reports written to `~/.codegrunt/crash-reports/` on uncaught agent-loop errors (never message history or file contents).
+- **Session store at `~/.codegrunt/conv-sessions/`** — `/resume`, `/sessions`, `--resume` persist/restore full message histories (max 20 sessions per cwd).
+- **Semantic code index** (`src/core/index/embedder.ts`) — `/index --semantic` builds a TF-IDF vector index for fuzzy `code_search`.
 
 ## Known Issues & Technical Debt
 
 ### Test coverage gaps
 
-Still not tested: `list_directory`, `search_files`, all 4 pipeline stages individually, `compact.ts` chunking logic, `at-resolver.ts`, `skills.ts` zip install, `lsp/checker.ts` diagnostics.
+Still not tested: `list_directory`, `search_files`, the 4 pipeline stages individually (`prepare-context`, `stream-response`, `process-tools`, `post-process` — only the integrated `tests/integration/pipeline-e2e.test.ts` and `tests/pipeline/engine.test.ts` exist), `compact.ts` chunking logic, `at-resolver.ts`, `skills.ts` zip install, `lsp/checker.ts` diagnostics.
 
-Also missing: `useAutocomplete.ts`/`PromptInput.tsx` history-vs-dropdown interaction beyond the pure-function unit tests in `tests/cli/useAutocomplete.test.ts` (no Ink component-level test harness yet), `branch-commands.ts` slash-command wiring (branching.ts itself is tested, the CLI handler is not).
+An Ink component-level test harness now exists (`ink-testing-library`), covering `App`, `PromptInput`, `ListPicker`, `StatusBar`, `output-channel`, `paste`, `git-branch`, `useHistory`. Still thin: the `useAutocomplete` ↔ `PromptInput` history-vs-dropdown interaction beyond the pure-function unit tests in `tests/cli/useAutocomplete.test.ts`, and `branch-commands.ts` slash-command wiring (`branching.ts` itself is tested, the CLI handler is not).
 
 ---
 

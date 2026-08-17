@@ -90,57 +90,67 @@ codegrunt/
 │   │   ├── index.ts          # 入口（commander 驱动的 CLI）
 │   │   ├── repl.ts           # 交互式 REPL 循环
 │   │   ├── input.ts          # 多行输入、Tab 补全、列表选择器
-│   │   ├── ink/              # Ink/React 终端 UI 组件
-│   │   │   ├── PromptInput.tsx   # 主输入组件（光标、历史、补全）
-│   │   │   ├── Dropdown.tsx      # 自动补全下拉菜单
-│   │   │   ├── ListPicker.tsx    # 方向键列表选择器
-│   │   │   ├── useAutocomplete.ts # 文件/命令/Skill 补全逻辑
-│   │   │   ├── useHistory.ts     # 持久化历史记录
-│   │   │   └── types.ts          # Ink 组件类型定义
 │   │   ├── commands.ts       # 斜杠命令（/help, /model, /init 等）
+│   │   ├── branch-commands.ts # /branch, /tree, /switch, /subagent-cache 处理
 │   │   ├── setup.ts          # 首次运行设置向导
 │   │   ├── init.ts           # /init 命令实现：代码库分析 + CODEGRUNT.md 生成
-│   │   ├── skills.ts         # 技能加载和管理
+│   │   ├── skills.ts         # 技能加载和管理（含 zip 安装）
 │   │   ├── update.ts         # 版本检查和升级
 │   │   ├── banner.ts         # ASCII 艺术横幅
-│   │   └── at-resolver.ts    # @文件/@URL 引用展开
+│   │   ├── at-resolver.ts    # @文件/@URL 引用展开
+│   │   └── ink/              # Ink/React 常驻终端 UI
+│   │       ├── App.tsx           # 常驻 REPL 树（历史 + 实时区 + 状态栏 + 输入）
+│   │       ├── PromptInput.tsx   # 主输入组件（光标、历史、补全、忙碌态）
+│   │       ├── StatusBar.tsx     # 状态栏（模型 · Git 分支 · Token / 忙碌倒计时）
+│   │       ├── Dropdown.tsx      # 自动补全下拉菜单
+│   │       ├── ListPicker.tsx    # 方向键列表选择器
+│   │       ├── output-channel.ts # 输出路由（sink/实时区）+ picker 注册表
+│   │       ├── useAutocomplete.ts # 文件/命令/Skill 补全逻辑
+│   │       ├── useHistory.ts     # 持久化历史记录
+│   │       ├── git-branch.ts     # 当前 Git 分支获取
+│   │       ├── paste.ts          # 括号粘贴状态机
+│   │       └── types.ts          # Ink 组件类型定义
 │   ├── core/
 │   │   ├── agent/
 │   │   │   ├── loop.ts       # 代理循环 — P/G/E 编排入口
 │   │   │   ├── intentor.ts   # 意图分类器（编码 vs 聊天 + Skill 匹配）
 │   │   │   ├── planner.ts    # 任务规划器（分解为多步骤计划）
+│   │   │   ├── generator.ts  # 共享生成器（4 阶段管道 runner）
 │   │   │   ├── evaluator.ts  # 质量评估器（输出检查 + 自动修正）
-│   │   │   └── subagent.ts   # 只读子代理执行引擎
-│   │   ├── pipeline/         # Harness 风格管道引擎
-│   │   │   ├── engine.ts     # PipelineEngine：阶段执行器
+│   │   │   ├── chat-flow.ts  # 聊天流程（跳过 Planner/Evaluator）
+│   │   │   ├── coding-flow.ts # 编码流程（P/G/E）
+│   │   │   ├── skill-flow.ts # Skill 流程（inline / subagent）
+│   │   │   ├── complexity.ts # 请求分类器 + 思考模式路由器
+│   │   │   ├── r1-harvester.ts # R1 思考内容工具调用回收
+│   │   │   ├── subagent.ts   # 只读子代理执行引擎（同步 + 并发）
+│   │   │   └── subagent-cache.ts # 子代理结果缓存
+│   │   ├── pipeline/         # Harness 风格管道引擎（4 阶段）
+│   │   │   ├── engine.ts     # PipelineEngine：阶段执行器 + Builder
 │   │   │   ├── types.ts      # 管道上下文、阶段接口、P/G/E 类型定义
 │   │   │   └── stages/
 │   │   │       ├── prepare-context.ts   # 构建系统提示 + 注入项目指南
 │   │   │       ├── stream-response.ts   # 流式 LLM 调用 + Token 累积
 │   │   │       ├── process-tools.ts     # 工具调用解析 + 执行 + 结果注入
-│   │   │       ├── process-tools-helpers.ts  # yes-for-all 会话状态
-│   │   │       └── post-process.ts      # 后处理：盲写警告、Token 统计
+│   │   │       ├── process-tools-helpers.ts  # 工具执行辅助（确认流/信任模式/权限/参数修复）
+│   │   │       └── post-process.ts      # 后处理：盲写警告、Token 统计、R1 回收
 │   │   ├── tools/
 │   │   │   ├── registry.ts   # 插件式 ToolRegistry（运行时注册/移除）
-│   │   │   ├── read_file.ts
-│   │   │   ├── write_file.ts
-│   │   │   ├── edit_file.ts
-│   │   │   ├── execute_shell.ts
-│   │   │   ├── list_directory.ts
-│   │   │   ├── search_files.ts
+│   │   │   ├── read_file.ts / write_file.ts / edit_file.ts
+│   │   │   ├── execute_shell.ts / list_directory.ts / search_files.ts
 │   │   │   ├── memory.ts     # memory_write / memory_read 工具
 │   │   │   ├── web_search.ts # Web 搜索工具
 │   │   │   ├── code_search.ts # 代码符号搜索工具
 │   │   │   └── agent_open.ts # 子代理委派工具
 │   │   ├── context/
-│   │   │   ├── manager.ts    # 上下文窗口管理（Token 预算、裁剪）
+│   │   │   ├── manager.ts    # 追加式上下文窗口管理（Token 预算、软裁剪）
 │   │   │   ├── compact.ts    # 分层块式对话压缩
 │   │   │   └── project-guide.ts  # 加载 CODEGRUNT.md / CLAUDE.md 项目指南
 │   │   ├── memory/
 │   │   │   ├── store.ts      # 持久化记忆存储（JSONL 文件）
 │   │   │   └── habits.ts     # 用户行为习惯学习
 │   │   ├── index/
-│   │   │   └── index.ts      # 代码符号索引构建和搜索
+│   │   │   ├── index.ts      # 代码符号索引构建和搜索
+│   │   │   └── embedder.ts   # TF-IDF 语义向量索引（--semantic）
 │   │   ├── permissions/
 │   │   │   └── index.ts      # Workspace 级别工具权限覆盖
 │   │   ├── snapshot/
@@ -152,45 +162,36 @@ codegrunt/
 │   │   ├── mcp/
 │   │   │   ├── config.ts     # MCP 服务器配置持久化
 │   │   │   ├── manager.ts    # MCP 客户端连接管理
+│   │   │   ├── registry.ts   # MCP Registry 搜索
 │   │   │   └── types.ts      # MCP 类型定义
 │   │   ├── session/
-│   │   │   └── store.ts      # 会话状态持久化
+│   │   │   ├── store.ts      # 会话状态持久化（conv-sessions）
+│   │   │   └── branching.ts  # 会话分支（fork/switch/tree）
+│   │   ├── swebench/
+│   │   │   └── export.ts     # SWE-bench 预测导出
 │   │   ├── events/
 │   │   │   └── bus.ts        # 类型化 EventBus
 │   │   ├── observability/
 │   │   │   ├── logger.ts     # Logger v2：文件传输 + Trace ID + 日志轮转
-│   │   │   └── metrics.ts    # 轻量 Metrics（计数器、计时器、快照）
+│   │   │   ├── metrics.ts    # 轻量 Metrics（计数器、计时器、快照）
+│   │   │   └── crash-report.ts # 本地崩溃报告（opt-in）
 │   │   └── usage.ts          # 会话/单次调用 Token 用量追踪
 │   ├── providers/
 │   │   └── deepseek/
 │   │       ├── provider.ts   # DeepSeek LLM 提供商实现（含指数退避重试）
 │   │       └── client.ts     # OpenAI 兼容客户端工厂 + API Key 验证
 │   ├── utils/
-│   │   ├── display.ts        # 终端输出格式化（计划、步骤、评估）
-│   │   ├── confirm.ts        # Diff 预览和用户确认
-│   │   ├── billing.ts        # 余额/用量查询和费用展示
-│   │   ├── markdown.ts       # 流式 Markdown 转终端渲染器
-│   │   ├── interrupt.ts      # SIGINT 处理
-│   │   ├── select.ts         # 交互式列表选择器（方向键导航）
-│   │   ├── locale.ts         # 系统语言检测
-│   │   └── constants.ts      # 共享常量
+│   │   ├── display.ts / confirm.ts / billing.ts / markdown.ts
+│   │   ├── interrupt.ts / select.ts / locale.ts / constants.ts
+│   │   ├── danger.ts / diff-renderer.ts / line-endings.ts
+│   │   ├── pager.ts / tool-spinner.ts
 │   ├── config.ts             # 配置加载（环境变量、配置文件）
 │   └── types.ts              # 共享 TypeScript 类型和接口
-├── tests/
-│   ├── tools/
-│   │   ├── read_file.test.ts
-│   │   ├── write_file.test.ts
-│   │   ├── edit_file.test.ts
-│   │   └── execute_shell.test.ts
-│   ├── agent/
-│   │   ├── intentor_planner.test.ts
-│   │   └── subagent.test.ts
-│   ├── context/
-│   │   └── context_manager.test.ts
-│   ├── pipeline/
-│   │   └── engine.test.ts
-│   └── manual/
-│       └── input-test.ts
+├── tests/                    # 镜像 src/ 结构（Vitest）
+│   ├── tools/  agent/  context/  core/  cli/  pipeline/
+│   ├── integration/pipeline-e2e.test.ts
+│   ├── providers/deepseek-retry.test.ts
+│   └── manual/input-test.ts
 ├── docs/                     # 文档
 ├── dist/                     # 编译输出（gitignore）
 ├── package.json
@@ -301,6 +302,9 @@ npx vitest run tests/agent/intentor_planner.test.ts
 npx vitest run tests/agent/subagent.test.ts
 npx vitest run tests/context/context_manager.test.ts
 npx vitest run tests/pipeline/engine.test.ts
+npx vitest run tests/integration/pipeline-e2e.test.ts
+npx vitest run tests/core/process-tools-helpers.test.ts
+npx vitest run tests/cli/PromptInput.test.tsx
 ```
 
 ### 详细输出
@@ -313,11 +317,26 @@ npx vitest --reporter=verbose
 
 测试位于 tests/ 目录，镜像 src/ 的结构。测试框架是 Vitest，在 vitest.config.ts 中配置。
 
+```
+tests/
+├── tools/          # read_file / write_file / edit_file / execute_shell
+├── agent/          # intentor_planner / subagent / r1-harvester / complexity / generator / loop-autocompact
+├── context/        # context_manager
+├── core/           # permissions / branching / subagent-cache / swebench / mcp / index / embedder / billing / crash-report / errors
+├── cli/            # App / PromptInput / ListPicker / StatusBar / output-channel / paste / git-branch / useAutocomplete / useHistory（Ink 组件测试）
+├── pipeline/       # engine / process-tools-helpers
+├── integration/    # pipeline-e2e（真实 4 阶段串接）
+├── providers/      # deepseek-retry
+├── utils/          # constants / danger / interrupt / line-endings / markdown / pager / select / tool-spinner / plan-display
+└── manual/         # input-test（手动输入测试）
+```
+
 关键特性：
 
 - **不需要 API 密钥**：工具层单元测试在本地文件系统和 shell 上操作，不针对任何 LLM。
 - **隔离的文件系统**：测试使用临时目录以避免副作用。
 - **异步测试**：大多数工具测试是异步的，因为它们涉及 I/O 操作。
+- **Ink 组件测试**：使用 `ink-testing-library` 渲染真实组件（`render`），例如 `tests/cli/PromptInput.test.tsx`。
 
 ### 编写测试
 
@@ -363,7 +382,7 @@ describe('read_file', () => {
     └──────────────────────────────────────────┘
          │
     ┌────▼──────────┐
-    │  管道引擎       │  5 个阶段：准备→流式→工具→后处理
+    │  管道引擎       │  4 个阶段：准备→流式→工具→后处理
     │  (Pipeline)    │
     └───────────────┘
          │
@@ -382,10 +401,10 @@ describe('read_file', () => {
 
 代理循环是 CodeGrunt 的核心，采用 **P/G/E（Planner / Generator / Evaluator）+ Intentor** 架构：
 
-**Phase 0 — Intentor（意图分类）**：将任务分为三条路径：
-- **Skill 匹配** → `runSkillFlow`：应用 Skill 系统提示 + 内容，支持子代理模式（只读执行）
-- **编码任务** → `runCodingFlow`：P/G/E 管道：规划 → 执行 → 评估 → 修正
-- **聊天任务** → `runChatFlow`：直接生成管道，跳过 Planner/Evaluator
+**Phase 0 — Intentor（意图分类）**：将任务分为三条路径（实现分散在 `chat-flow.ts` / `coding-flow.ts` / `skill-flow.ts`）：
+- **Skill 匹配** → `runSkillFlow`（`skill-flow.ts`）：应用 Skill 系统提示 + 内容，支持子代理模式（只读执行）
+- **编码任务** → `runCodingFlow`（`coding-flow.ts`）：P/G/E 管道：规划 → 执行 → 评估 → 修正
+- **聊天任务** → `runChatFlow`（`chat-flow.ts`）：直接生成管道，跳过 Planner/Evaluator
 
 Intentor 优先使用快速启发式规则：
 - **关键词模式**：编码信号（写/创建/修复/重构）vs 非编码（解释/什么是/总结）
@@ -412,6 +431,8 @@ Intentor 优先使用快速启发式规则：
 - **流式优先**：所有 LLM 通信通过 `AsyncIterable<StreamChunk>` 流式传输，实时终端输出
 - **子代理**：`agent_open` 工具委派只读研究任务，限制使用非破坏性工具集
 - **模型分支**：`isReasonerModel()` 检测 R1 变体；`supportsReasoning()` 匹配支持 `reasoning_content` 的模型。`reasoning_content` 仅对最后一条助手消息发送以减少 Token 消耗
+- **模型自动路由**（`selectModelForTask`）：仅对 `deepseek-v4-*` 模型生效。非编码/Skill 任务、简单或 ≤60 字符的任务路由到 `deepseek-v4-flash`；复杂编码信号路由到 `deepseek-v4-pro`；永远不会路由到推理模型
+- **思考模式路由器**（`complexity.ts` 的 `classifyComplexity()`）：返回 `simple | medium | complex` 三档。编码任务：simple 强制 `thinking: 'disabled'`；complex 在 `config.autoThinkingMode`（默认 true）时强制 `thinking: 'enabled'`；medium 不干预
 
 ### 工具系统
 
@@ -437,26 +458,27 @@ Intentor 优先使用快速启发式规则：
 
 ### 管道引擎（src/core/pipeline/）
 
-借鉴 Harness CI/CD 管道架构，将每次 Agent 交互分解为 5 个独立阶段：
+借鉴 Harness CI/CD 管道架构，将每次 Agent 交互分解为 **4 个独立阶段**（在 `src/core/agent/generator.ts` 中串接），所有阶段共享一个 `PipelineContext`：
 
 | 阶段 | 文件 | 职责 |
 |---|---|---|
 | PrepareContext | `prepare-context.ts` | 构建系统提示、注入项目指南、初始化消息 |
 | StreamResponse | `stream-response.ts` | 流式调用 LLM、累积文本/推理/工具调用；转发真实缓存命中/未命中 Token 数 |
 | ProcessToolCalls | `process-tools.ts` | 解析工具调用、通过 executor 执行、注入结果 |
-| ProcessToolHelpers | `process-tools-helpers.ts` | yes-for-all 会话级状态管理 |
-| PostProcess | `post-process.ts` | 盲写警告检测、Token 统计、最终输出格式化 |
+| PostProcess | `post-process.ts` | 盲写警告检测、Token 统计、最终输出格式化、R1 思考内容工具调用回收 |
+
+> `process-tools-helpers.ts` **不是**一个独立阶段，而是辅助模块：实现 `executeToolCall()`（破坏性工具确认流、`/trust` 信任模式、workspace 权限检查、`repairToolArgs()` schema 感知参数修复）。
 
 所有阶段共享一个 `PipelineContext`，由 `PipelineEngine` 按序执行。
 
 ### 上下文管理（src/core/context/manager.ts）
 
-ContextManager 维护对话历史：
+ContextManager 维护对话历史（**追加式、缓存优先**）：
 
 - **Token 估算**：使用简单的 4:1 字符与 Token 比率。
-- **裁剪**：当估算的 Token 数超过预算时，移除最旧的非系统消息。
-- **预算**：聊天模型默认 90,000 Token；推理模型 100,000 Token。
-- **自动压缩**（`compact.ts`）：在 Token 预算达到 50% 或非系统消息超过 30 条时触发。保留最近的 15 条消息，生成最多 1500 Token 的摘要。使用分层块式压缩策略处理大量历史。
+- **裁剪**：`checkCapacity()` 不再主动从前面裁剪消息；仅设置 `needsCompact`/`nearCapacity` 标志。紧急软裁剪（`softTrimFromEnd()`）仅在 Token 数超过 `预算 × 2.0` 时触发，且从消息**末尾**裁剪（保护 DeepSeek 前缀缓存），绝不触碰前缀。
+- **预算**：聊天模型默认 90,000 Token（`CHAT_CONTEXT_BUDGET`）；推理模型 100,000 Token（`CONTEXT_BUDGET`）。
+- **自动压缩**（`compact.ts` + `loop.ts` 的 `maybeAutoCompact()`）：当 `needsCompact` 被标记（Token 预算达到 70% 或非系统消息超过 40 条）且 `config.autoCompact`（默认 true）时触发。分层块式压缩：每个块 ≤12000 Token、每块摘要 ≤400 Token、合并最终摘要 ≤1500 Token，保留最近的 15 条消息原样不动，使用 `deepseek-v4-flash` 模型。也可通过 `/compact` 手动触发。
 
 ### 提供商系统
 
@@ -476,10 +498,12 @@ DeepSeek 提供商实现包括：
 
 `agent_open` 工具可将独立研究任务委派给只读子代理：
 
-- **只读工具集**：限制使用 `read_file`、`search_files`、`list_directory`、`code_search`、`web_search`、`memory_read`。无 `write_file`/`edit_file`/`execute_shell` 权限
+- **只读工具集**：限制使用 `read_file`、`search_files`、`list_directory`、`code_search`、`web_search`、`memory_read`。无 `write_file`/`edit_file`/`execute_shell` 权限，因此子代理的工具调用永远不会走 `confirmOrSkip` 确认流
 - **隔离上下文**：子代理获得全新的 `Message[]` 数组，看不到主代理的对话历史
-- **模型降级**：始终降级为 `deepseek-v4-flash`（与 Intentor 分类调用相同策略）
-- **同步执行**：当前为同步单次执行，调用阻塞直至子代理生成最终答案或达到迭代上限（10 次）
+- **模型降级**：默认降级为 `deepseek-v4-flash`（与 Intentor 分类调用相同策略）；传 `noModelDowngrade: true`（或显式模型）保留调用方配置的模型层级
+- **生命周期**：单次调用 `runSubagent()` 阻塞直至子代理生成最终答案或达到 `MAX_SUBAGENT_ITERATIONS`（10 次）。每个子代理有独立的超时（`DEFAULT_SUBAGENT_TIMEOUT_MS = 120_000`），通过内部 `AbortController` 与调用方 signal 合并实现取消
+- **并发执行（v0.7）**：`runSubagentsConcurrent()` 通过 `Promise.allSettled` 批量运行多个任务，并发上限 `MAX_CONCURRENT_SUBAGENTS`（10）。默认任一任务失败即抛出聚合错误；传 `allowPartialFailure: true` 得到混合成功/失败的结果
+- **结果缓存（subagent-cache.ts）**：按 `{task, model, systemOverride, cwd}` 的 sha256 哈希缓存结果（`useCache: true` 时启用），5 分钟 TTL、100 条上限（按最近访问淘汰）。用 `/subagent-cache [clear]` 管理
 
 ### 记忆系统（src/core/memory/）
 
@@ -549,21 +573,27 @@ DeepSeek 提供商实现包括：
   - **日志轮转**：保留最近 5 个日志文件，每个最大 5 MB
   - **环境变量控制**：`CODEGRUNT_LOG_LEVEL`（debug/info/warn/error）、`CODEGRUNT_LOG_FILE`（设为 0/false 禁用）、`CODEGRUNT_VERBOSE`
   - 错误自动发布到 EventBus
-- **Metrics**（`observability/metrics.ts`）：计数器/计时器/快照，支持遥测摘要输出
-- **EventBus**（`events/bus.ts`）：类型化事件总线，覆盖管道、工具、LLM、对话等全部生命周期事件
+- **Metrics**（`observability/metrics.ts`）：计数器/计时器/快照，支持遥测摘要输出（`CODEGRUNT_TELEMETRY=1`）
+- **Crash 报告**（`observability/crash-report.ts`）：opt-in（`crashReportOnError` / `CODEGRUNT_CRASH_REPORT`）本地 JSON 崩溃报告，写入 `~/.codegrunt/crash-reports/`，绝不包含消息历史或文件内容，仅含截断的任务文本与错误元数据
+- **EventBus**（`events/bus.ts`）：类型化事件总线，事件类型：`pipeline:started` / `pipeline:finished` / `stage:started` / `stage:finished` / `tool:called` / `tool:result` / `llm:request` / `llm:usage` / `error`
 - **Usage 追踪**（`usage.ts`）：共享 Token 用量模块（`addUsage`、`getSessionUsage`、`getLastCallUsage`），从 `loop.ts` 提取以避免循环依赖
 
 ### Ink/React 终端 UI（`src/cli/ink/`）
 
-CodeGrunt 提供基于 React 的现代终端 UI，使用 `ink` 库构建：
+CodeGrunt 提供基于 React 的现代终端 UI，使用 `ink` 库构建。REPL 会话期间挂载一个**常驻 React 树**（`App.tsx`），`output-channel.ts` 作为输出路由层：未注册 sink（单次任务模式）时直接写 `process.stdout`，注册 sink（REPL）后路由进 Ink 状态，由 reconciler 持有终端实时区域。
 
 | 组件 | 描述 |
 |---|---|
-| `PromptInput.tsx` | 主输入组件：光标移动、上下键历史导航、自动补全下拉、Ctrl+C 取消 |
+| `App.tsx` | 常驻 REPL 树：`<Static>` 历史 + 实时工具行 + 流式文本 + `<StatusBar>` + `<PromptInput>`/`<ListPicker>`；返回 `AppHandle`（`promptForInput`/`setBusy`/`onCancelBusy`/`setTotalTokens`） |
+| `PromptInput.tsx` | 主输入组件：光标移动、上下键历史导航、自动补全下拉、忙碌态（置灰/禁止编辑）、Ctrl+C 双击取消、括号粘贴 |
+| `StatusBar.tsx` | 状态栏：左侧 `模型 · ⎇ Git分支 · Nk tokens`，忙碌时右侧 `{elapsed}s · Esc to cancel` |
 | `Dropdown.tsx` | 自动补全浮层：`❯` 指示器、skill/builtin/file 分类着色、最多 8 项可见 |
-| `ListPicker.tsx` | 方向键选择器，用于模型/配置的交互式选择 |
+| `ListPicker.tsx` | 方向键选择器，用于模型/配置/信任模式的交互式选择（App 挂载时在树内渲染） |
+| `output-channel.ts` | 输出路由（`write`/`appendLiveText`/`setLiveTextDirect`/`commitLiveText`/`setLiveTool`）+ picker 注册表 |
 | `useAutocomplete.ts` | 文件路径（`@`）补全、斜杠命令补全、Skill 名称补全 |
 | `useHistory.ts` | 持久化命令历史，方向键导航 |
+| `git-branch.ts` | 获取并缓存当前 Git 分支（供状态栏显示） |
+| `paste.ts` | 括号粘贴状态机（多行粘贴不再被误读为回车） |
 
 ---
 
@@ -697,17 +727,35 @@ CodeGrunt 在交互式 REPL 中提供了一组斜杠命令，实现在 `src/cli/
 | `/help` | 显示可用命令和当前配置 |
 | `/model <名称>` | 切换活跃的 LLM 模型（无参数时交互式选择） |
 | `/init` | 分析代码库并生成 CODEGRUNT.md 项目指南 |
-| `/index` | 构建代码符号索引，加速 code_search 工具 |
+| `/index` | 构建代码符号索引，加速 code_search 工具（`--semantic` 启用向量语义搜索） |
 | `/clear` | 清除对话历史 |
 | `/compact` | 总结并压缩对话历史以节省 Token（分层块式压缩） |
 | `/review` | 审查会话变更中的逻辑问题 |
 | `/cost` | 显示当前会话的 Token 使用量和预估费用（含缓存命中/未命中统计） |
+| `/cache` | 显示 DeepSeek 前缀缓存命中率与预估节省 |
+| `/cost-report` | 显示今日 / 本月聚合费用报告 |
 | `/balance` | 显示账户余额和用量（今日 / 本月） |
 | `/config` | 显示或更改配置设置 |
 | `/reasoning` / `/effort` | 设置 R1 模型的推理强度（low/medium/high） |
+| `/theme` | 切换终端主题（dark / light） |
+| `/token` / `/apikey` | 设置或更换 DeepSeek API 密钥 |
+| `/trust` | 设置信任模式：plan（只读）/ code（确认）/ auto（全部允许） |
+| `/status` | 显示会话状态、信任模式、缓存命中率和上下文大小 |
+| `/resume [id]` | 恢复之前的会话（可交互选择） |
+| `/sessions [delete <id>]` | 列出和管理已保存的会话 |
+| `/memory [delete <id>]` | 显示持久化记忆条目和上次会话摘要 |
+| `/hooks` | 列出已加载的钩子脚本 |
 | `/skills` | 列出和管理技能（创建、列表、安装） |
 | `/search-engine` | 切换 Web 搜索用的搜索引擎 |
+| `/baseurl [url]` | 设置自定义 DeepSeek API Base URL |
 | `/restore` | 从自动快照恢复工作状态 |
+| `/swebench <instance-id>` | 将会话 diff 导出为 SWE-bench 预测（JSONL） |
+| `/permissions` | 查看或设置每个工具的 workspace 权限（allow/deny/ask） |
+| `/mcp` | 管理 MCP 服务器：list \| add \| remove \| search |
+| `/branch <turn>` | 从历史轮次创建会话分支 |
+| `/tree` | 可视化会话分支树 |
+| `/switch <branch-id>` | 切换到另一个会话分支 |
+| `/subagent-cache [clear]` | 显示或清空子代理结果缓存 |
 
 ---
 
@@ -823,11 +871,16 @@ CodeGrunt 的配置加载链（优先级从高到低）：
 | 频率惩罚 | `CODEGRUNT_FREQUENCY_PENALTY` | `0` |
 | 存在惩罚 | `CODEGRUNT_PRESENCE_PENALTY` | `0` |
 | Base URL | `CODEGRUNT_BASE_URL` | `https://api.deepseek.com` |
+| 信任模式 | `CODEGRUNT_TRUST_MODE` | `code` |
+| 搜索引擎 | `CODEGRUNT_SEARCH_ENGINE` | `mojeek` |
+| SearXNG URL | `CODEGRUNT_SEARXNG_URL` | — |
+| 自动思考 | `CODEGRUNT_AUTO_THINKING` | `true` |
+| 自动压缩 | `CODEGRUNT_AUTO_COMPACT` | `true` |
+| 崩溃报告 | `CODEGRUNT_CRASH_REPORT` | `false` |
+| 主题 | `CODEGRUNT_THEME` | `dark` |
 | 日志级别 | `CODEGRUNT_LOG_LEVEL` | `info` |
 | 文件日志 | `CODEGRUNT_LOG_FILE` | 启用 |
 | 详细输出 | `CODEGRUNT_VERBOSE` | 禁用 |
-| 搜索引擎 | `CODEGRUNT_SEARCH_ENGINE` | `mojeek` |
-| SearXNG URL | `CODEGRUNT_SEARXNG_URL` | — |
 
 ### 模型判断逻辑（`src/config.ts`）
 

@@ -36,12 +36,13 @@ codegrunt "refactor the auth module to use async/await"
 - **⚡ Streaming output** — real-time token streaming with Markdown rendering and reasoning visibility for a responsive terminal experience
 - **📎 @-references** — inject file contents, directory listings, or web page content directly into your prompt with `@file.ts`, `@src/`, or `@https://example.com`
 - **🎯 Slash commands** — `/init` to auto-generate project guide, `/index` to build code symbol index, `/model` to switch models, `/compact` to compress conversation history, `/review` to review changes, `/skills` to manage skills, and more
-- **🔒 Safe by default** — destructive operations (write/edit/shell) show a diff preview and require user confirmation before applying, with "Yes for all" session mode and workspace-level permission overrides
-- **🔧 Skills system** — install and run reusable prompt templates as slash commands, with auto-discovery via Intentor keyword matching; supports subagent mode (read-only execution)
+- **🔒 Safe by default** — destructive operations (write/edit/shell) show a diff preview and require user confirmation before applying, with "Yes for all" session mode, trust mode (`/trust`), and workspace-level permission overrides (`/permissions`)
+- **🔧 Skills system** — install and run reusable prompt templates as slash commands (`codegrunt skills add -f <file.zip>` or `/skills create`), with `.claude/skills/` compatibility and auto-discovery via Intentor keyword matching; supports subagent mode (read-only execution)
 - **🧠 Habit Learning** — automatically analyzes your language preference, verbosity preference, and tool confirmation behavior, persisting learned habits to memory for optimized future interactions
 - **📸 Auto-snapshots** — side-git snapshots created after every coding turn, restorable via `/restore`
-- **💲 Cost tracking** — real-time session token usage and cost display with `/cost` and `/balance` commands
-- **🎨 Modern Terminal UI** — Ink/React-based input components with arrow-key navigation, persistent history, and autocomplete dropdown
+- **💲 Cost tracking** — real-time session token usage and cost display with `/cost`, `/cache`, `/cost-report`, and `/balance` commands
+- **🎨 Modern Terminal UI** — persistent Ink/React-based interface with arrow-key navigation, persistent history, and autocomplete dropdown; a status bar shows model / git branch / token usage; `/theme` switches between dark and light
+- **🪢 Session branching & resume** — fork sessions from any historical turn with `/branch`, `/tree`, `/switch`; persist and restore full sessions with `/resume`, `/sessions`, `--resume`
 - **📋 Structured Logging** — Logger v2 with JSONL file logs (`~/.codegrunt/logs/`), trace IDs for cross-session correlation, and automatic log rotation (5 files × 5 MB)
 - **🔌 Hook System** — custom user-defined hook scripts (Shell/JS) triggered at prompt submit, pre/post tool use, and stop events
 - **🔍 Language Diagnostics** — auto-runs TypeScript/Python/Go/Rust/ESLint diagnostics after file edits
@@ -130,17 +131,35 @@ Executes a single task and exits. Useful for scripting and quick queries.
 | `/model` | Switch model interactively (arrow-key selector) |
 | `/model <id>` | Switch to a specific model (e.g., `/model deepseek-v4-pro`) |
 | `/init` | Analyze the codebase and generate a `CODEGRUNT.md` project guide |
-| `/index` | Build code symbol index for faster `code_search` tool |
+| `/index` | Build code symbol index for faster `code_search` tool (`--semantic` enables vector fuzzy search) |
 | `/clear` | Clear conversation context |
 | `/compact` | Summarize and compress conversation history to save tokens (hierarchical chunk-based compaction) |
 | `/review` | Review session changes for logic issues |
 | `/cost` | Show session token usage and estimated cost (with cache hit/miss stats) |
+| `/cache` | Show detailed DeepSeek prefix cache hit rate and estimated savings |
+| `/cost-report` | Show aggregated cost report (today / this month) |
 | `/balance` | Show account balance and usage (today / this month) |
 | `/config` | Show or change configuration settings |
 | `/reasoning` / `/effort` | Set reasoning effort for R1 models (low/medium/high) |
+| `/theme` | Set TUI color theme (dark / light) |
+| `/token` / `/apikey` | Set or validate the DeepSeek API key |
+| `/trust` | Set trust mode: plan (read-only) / code (confirm) / auto (yes-all) |
+| `/status` | Show session status, trust mode, cache hit rate, and context size |
+| `/resume [id]` | Resume a previous conversation session |
+| `/sessions [delete <id>]` | List and manage saved sessions |
+| `/memory [delete <id>]` | Show persistent memory entries and last session summary |
+| `/hooks` | List loaded hook scripts from `~/.codegrunt/hooks/` |
 | `/skills` | List and manage skills (create, list, install) |
 | `/search-engine` | Switch the web search engine |
+| `/baseurl [url]` | Set a custom DeepSeek API base URL (mirrors/proxies) |
 | `/restore` | Restore workspace from an auto-snapshot |
+| `/swebench <instance-id>` | Export current session diff as a SWE-bench prediction (JSONL) |
+| `/permissions` | View or set per-tool workspace permissions (allow/deny/ask) |
+| `/mcp` | Manage MCP servers: `/mcp list` \| `add` \| `remove` \| `search` |
+| `/branch <turn>` | Create a session branch from a historical turn |
+| `/tree` | Visualize the session branch tree |
+| `/switch <branch-id>` | Switch to a different branch |
+| `/subagent-cache [clear]` | Show or clear the sub-agent result cache |
 
 ### @-References
 
@@ -174,11 +193,16 @@ CodeGrunt is configured via environment variables or a `~/.codegrunt/config.json
 | `CODEGRUNT_TOP_P` | Nucleus sampling (0-1) | `1` |
 | `CODEGRUNT_FREQUENCY_PENALTY` | Repetition penalty (-2 to 2) | `0` |
 | `CODEGRUNT_PRESENCE_PENALTY` | Topic diversity penalty (-2 to 2) | `0` |
+| `CODEGRUNT_TRUST_MODE` | Trust mode: `plan` \| `code` \| `auto` | `code` |
+| `CODEGRUNT_SEARCH_ENGINE` | Web search engine: `mojeek` \| `searxng` \| `duckduckgo` | `mojeek` |
+| `CODEGRUNT_SEARXNG_URL` | Self-hosted SearXNG instance URL (when engine is searxng) | — |
+| `CODEGRUNT_AUTO_THINKING` | Auto-enable thinking on complex tasks (`1`/`true`) | `true` |
+| `CODEGRUNT_AUTO_COMPACT` | Auto-compact context at capacity (`1`/`true`) | `true` |
+| `CODEGRUNT_CRASH_REPORT` | Write local crash reports on error (`1`/`true`) | `false` |
+| `CODEGRUNT_THEME` | TUI theme: `dark` \| `light` | `dark` |
 | `CODEGRUNT_LOG_LEVEL` | Log level: `debug` \| `info` \| `warn` \| `error` | `info` |
 | `CODEGRUNT_LOG_FILE` | Set to `0` or `false` to disable file logging | enabled |
 | `CODEGRUNT_VERBOSE` | Enable verbose stderr output | disabled |
-| `CODEGRUNT_SEARCH_ENGINE` | Web search engine: `mojeek` \| `searxng` \| `duckduckgo` | `mojeek` |
-| `CODEGRUNT_SEARXNG_URL` | Self-hosted SearXNG instance URL (when engine is searxng) | — |
 
 ### Config file (`~/.codegrunt/config.json`)
 
@@ -186,12 +210,19 @@ CodeGrunt is configured via environment variables or a `~/.codegrunt/config.json
 {
   "apiKey": "sk-xxxxxxxx",
   "model": "deepseek-v4-pro",
+  "baseURL": "https://api.deepseek.com",
   "maxTokens": 8192,
   "temperature": 0.2,
   "reasoningEffort": "medium",
   "topP": 1,
   "frequencyPenalty": 0,
-  "presencePenalty": 0
+  "presencePenalty": 0,
+  "trustMode": "code",
+  "searchEngine": "mojeek",
+  "autoThinkingMode": true,
+  "autoCompact": true,
+  "crashReportOnError": false,
+  "theme": "dark"
 }
 ```
 
