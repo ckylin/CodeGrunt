@@ -18,6 +18,8 @@ import { getToolByName } from '../../tools/registry.js';
 import { confirmEdit, confirmShellCommand, applyEdit } from '../../../utils/confirm.js';
 import { isDangerousWritePath, isDangerousShellCommand } from '../../../utils/danger.js';
 import { getToolPermission, type WorkspacePermissions, type PermissionAction } from '../../permissions/index.js';
+import { ToolError } from '../../errors.js';
+import { getLogger } from '../../observability/logger.js';
 
 // ── Tool-call JSON repair (v0.6: schema-aware) ─────────────────────────────
 //
@@ -506,7 +508,12 @@ export async function executeToolCall(
   try {
     return await tool.execute(args);
   } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    return { success: false, output: '', error: `Tool ${name} threw an error: ${message}` };
+    // Wrapped as ToolError for logging/crash-report purposes only — the
+    // pipeline itself must keep receiving a graceful ToolResult (not a thrown
+    // error) so the failure gets reported back to the model as a tool result
+    // it can react to, rather than aborting the whole turn.
+    const toolError = new ToolError(name, err instanceof Error ? err.message : String(err), err instanceof Error ? err : undefined);
+    getLogger('tool-exec').error(`Tool ${name} threw an error`, { error: toolError.message, stack: toolError.stack });
+    return { success: false, output: '', error: `Tool ${name} threw an error: ${toolError.message}` };
   }
 }

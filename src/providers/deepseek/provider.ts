@@ -5,6 +5,7 @@ import type { CodeGruntConfig } from '../../types.js';
 import chalk from 'chalk';
 import { addUsage, PRICING as CORE_PRICING, calculateCost } from '../../core/usage.js';
 import { recordUsage } from '../../utils/billing.js';
+import { ApiError, RetryableError, UserAbortError } from '../../core/errors.js';
 
 const RETRYABLE_STATUS = new Set([429, 500, 502, 503, 504]);
 const RETRYABLE_CODES = new Set(['ECONNRESET', 'ETIMEDOUT']);
@@ -38,12 +39,29 @@ function getRetryAfterMs(err: unknown): number | undefined {
   return isNaN(seconds) ? undefined : Math.min(seconds * 1000, MAX_RETRY_AFTER_MS);
 }
 
-async function withRetry<T>(fn: () => Promise<T>, signal?: AbortSignal): Promise<T> {
+/** Wraps a raw OpenAI SDK error in one of our typed error classes so callers
+ *  (CLI/repl top-level catches) can distinguish "the API rejected the
+ *  request" from "the network is flaky" without re-inspecting HTTP status
+ *  codes themselves. Preserves the original error as `.cause` for logging. */
+function wrapProviderError(err: unknown, status: number | undefined): CodeGruntErrorLike {
+  const message = err instanceof Error ? err.message : String(err);
+  if (status !== undefined && NON_RETRYABLE_STATUS.has(status)) {
+    return new ApiError(message, status, { cause: err instanceof Error ? err : undefined });
+  }
+  return new RetryableError(message, { cause: err instanceof Error ? err : undefined });
+}
+
+// Local alias — both ApiError and RetryableError satisfy this shape.
+type CodeGruntErrorLike = ApiError | RetryableError;
+
+// Exported for direct unit testing of retry/error-wrapping behavior without
+// needing to mock the full OpenAI streaming client.
+export async function withRetry<T>(fn: () => Promise<T>, signal?: AbortSignal): Promise<T> {
   const maxRetries = 3;
   let lastError: unknown;
 
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
-    if (signal?.aborted) throw new Error('Aborted');
+    if (signal?.aborted) throw new UserAbortError();
 
     try {
       return await fn();
@@ -55,7 +73,7 @@ async function withRetry<T>(fn: () => Promise<T>, signal?: AbortSignal): Promise
 
       // Non-retryable HTTP errors — fail immediately
       if (status !== undefined && NON_RETRYABLE_STATUS.has(status)) {
-        throw err;
+        throw wrapProviderError(err, status);
       }
 
       // Only retry known transient errors
@@ -64,7 +82,7 @@ async function withRetry<T>(fn: () => Promise<T>, signal?: AbortSignal): Promise
         (code !== undefined && RETRYABLE_CODES.has(code));
 
       if (!isRetryable || attempt === maxRetries) {
-        throw err;
+        throw wrapProviderError(err, status);
       }
 
       // Determine wait time: retry-after header wins over backoff
@@ -82,13 +100,13 @@ async function withRetry<T>(fn: () => Promise<T>, signal?: AbortSignal): Promise
         const timer = setTimeout(resolve, waitMs);
         signal?.addEventListener('abort', () => {
           clearTimeout(timer);
-          reject(new Error('Aborted'));
+          reject(new UserAbortError());
         }, { once: true });
       });
     }
   }
 
-  throw lastError;
+  throw wrapProviderError(lastError, getStatusCode(lastError));
 }
 
 export class DeepSeekProvider implements LLMProvider {

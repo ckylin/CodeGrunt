@@ -1,6 +1,7 @@
 import chalk from 'chalk';
 import type { TaskPlan, EvaluationResult, IntentResult } from '../core/pipeline/types.js';
 import { ACCENT } from './constants.js';
+import { formatErrorForDisplay } from '../core/errors.js';
 
 const blue  = (s: string) => chalk.hex(ACCENT)(s);
 const muted = chalk.gray;
@@ -35,6 +36,15 @@ export function printThinkingCollapsed(reasoningText: string, elapsedMs: number)
 
 export function printError(message: string): void {
   process.stderr.write(danger('  error  ') + message + '\n');
+}
+
+/** Like printError, but branches the label on the error's type (network / api /
+ *  config / tool / timeout / cancelled) via formatErrorForDisplay() instead of
+ *  always showing the generic "error" label — lets the user tell "DeepSeek is
+ *  down" apart from "your API key is wrong" apart from "you hit Esc" at a glance. */
+export function printTypedError(err: unknown): void {
+  const { label, message } = formatErrorForDisplay(err);
+  process.stderr.write(danger(`  ${label}  `) + message + '\n');
 }
 
 // ── P/G/E Plan & Evaluation Display ─────────────────────────────────────

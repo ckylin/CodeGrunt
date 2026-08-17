@@ -4,7 +4,7 @@ import { ContextManager } from '../core/context/manager.js';
 import { DeepSeekProvider } from '../providers/deepseek/provider.js';
 import { createInterruptController, getActiveInterruptCount } from '../utils/interrupt.js';
 
-import { printError } from '../utils/display.js';
+import { printTypedError } from '../utils/display.js';
 import { resolveAtReferences } from './at-resolver.js';
 import { handleSlashCommand } from './commands.js';
 import { printBanner } from './banner.js';
@@ -28,8 +28,23 @@ import type { CodeGruntConfig, LLMProvider } from '../types.js';
 import { getLogger } from '../core/observability/logger.js';
 import { getDefaultMetrics } from '../core/observability/metrics.js';
 import { getHookRegistry } from '../core/hooks/registry.js';
+import { writeCrashReport, type CrashReportContext } from '../core/observability/crash-report.js';
 
 const log = getLogger('repl');
+
+/** Writes a local crash report if config.crashReportOnError is enabled.
+ *  No-op otherwise. `config` is read fresh from the closure at call time,
+ *  not captured, since /config can change crashReportOnError mid-session. */
+async function maybeWriteCrashReport(
+  err: unknown,
+  ctx: CrashReportContext & { crashReportOnError?: boolean },
+): Promise<void> {
+  if (!ctx.crashReportOnError) return;
+  const path = await writeCrashReport(err, ctx);
+  if (path) {
+    process.stderr.write(chalk.gray(`  crash report written to ${path}\n`));
+  }
+}
 
 export async function startRepl(
   initialConfig: CodeGruntConfig,
@@ -255,11 +270,13 @@ export async function startRepl(
         } catch { /* non-critical */ }
       }
     } catch (err) {
-      if ((err as Error)?.name === 'AbortError' || interrupt.signal.aborted) {
+      const errName = (err as Error)?.name;
+      if (errName === 'AbortError' || errName === 'UserAbortError' || interrupt.signal.aborted) {
         process.stdout.write(chalk.yellow('\nInterrupted.\n'));
       } else {
-        printError(err instanceof Error ? err.message : String(err));
+        printTypedError(err);
         log.error('Agent loop failed', { error: err instanceof Error ? err.message : String(err) });
+        await maybeWriteCrashReport(err, { cwd, task: effectiveTask, model: config.model, crashReportOnError: config.crashReportOnError });
       }
     } finally {
       interrupt.cleanup();

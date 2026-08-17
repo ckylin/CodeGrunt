@@ -140,6 +140,19 @@ export interface CodeGruntConfig {
    * discarded once compacted).
    */
   autoCompact?: boolean;
+  /**
+   * When true, an uncaught agent-loop error writes a local JSON crash report
+   * to ~/.codegrunt/crash-reports/ (task text, error message/stack, model,
+   * platform — no message history, no file contents). Nothing is uploaded
+   * anywhere; this is purely a local artifact you can attach to a bug report
+   * yourself. Off by default — most errors are already visible in the
+   * terminal and don't need a persisted file.
+   */
+  crashReportOnError?: boolean;
+  /** TUI color theme: 'dark' (default) or 'light'. Adjusts the accent color
+   *  and muted/dim text mapping; semantic colors (error=red, success=green)
+   *  are unaffected. */
+  theme?: 'dark' | 'light';
 }
 
 // ── Habit tracking ──────────────────────────────────────────────────────────

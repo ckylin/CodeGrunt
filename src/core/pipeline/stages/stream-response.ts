@@ -150,7 +150,7 @@ export class StreamResponseStage implements Stage {
       // (some reasoner models emit thinking without reasoning_content deltas)
 
     } catch (err) {
-      if ((err as Error)?.name === 'AbortError' || ctx.signal?.aborted) {
+      if ((err as Error)?.name === 'AbortError' || (err as Error)?.name === 'UserAbortError' || ctx.signal?.aborted) {
         log.info('LLM stream aborted');
         throw err;
       }

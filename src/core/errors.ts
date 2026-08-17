@@ -92,3 +92,41 @@ export class TimeoutError extends CodeGruntError {
     this.name = 'TimeoutError';
   }
 }
+
+// ── User-facing error formatting ─────────────────────────────────────────────
+// Maps our typed errors (and any error that slips through untyped) to a short
+// label + message pair for terminal display. Kept here rather than in
+// utils/display.ts so the error-type knowledge lives next to the error
+// classes themselves — display.ts just calls this and prints the result.
+
+export interface FormattedError {
+  /** Short category label shown before the message, e.g. "network", "api". */
+  label: string;
+  message: string;
+}
+
+export function formatErrorForDisplay(err: unknown): FormattedError {
+  if (err instanceof RetryableError) {
+    return { label: 'network', message: `${err.message} (retried 3x, still failing — check your connection or DeepSeek's status page)` };
+  }
+  if (err instanceof ApiError) {
+    const hint = err.status === 401 ? ' (check your API key with /config)'
+      : err.status === 403 ? ' (access denied — check your account permissions)'
+      : err.status === 404 ? ' (check the model name with /model)'
+      : '';
+    return { label: 'api', message: `${err.message}${hint}` };
+  }
+  if (err instanceof ValidationError) {
+    return { label: 'config', message: err.message };
+  }
+  if (err instanceof ToolError) {
+    return { label: 'tool', message: `${err.toolName}: ${err.message}` };
+  }
+  if (err instanceof TimeoutError) {
+    return { label: 'timeout', message: err.message };
+  }
+  if (err instanceof UserAbortError) {
+    return { label: 'cancelled', message: err.message };
+  }
+  return { label: 'error', message: err instanceof Error ? err.message : String(err) };
+}

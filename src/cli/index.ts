@@ -8,7 +8,8 @@ import { ContextManager } from '../core/context/manager.js';
 import { startRepl } from './repl.js';
 import { runAgentLoop } from '../core/agent/loop.js';
 import { createInterruptController } from '../utils/interrupt.js';
-import { printError } from '../utils/display.js';
+import { printTypedError } from '../utils/display.js';
+import { writeCrashReport } from '../core/observability/crash-report.js';
 import { runSetup } from './setup.js';
 import { installSkillFromZip, removeSkill, getGlobalSkillsDir } from './skills.js';
 
@@ -90,11 +91,12 @@ program
         process.stdout.write('\n');
         log.info('One-shot task completed');
       } catch (err) {
-        if ((err as Error)?.name === 'AbortError' || interrupt.signal.aborted) {
+        const errName = (err as Error)?.name;
+        if (errName === 'AbortError' || errName === 'UserAbortError' || interrupt.signal.aborted) {
           process.stdout.write(chalk.yellow('\nInterrupted.\n'));
           log.info('One-shot task interrupted by user');
         } else {
-          printError(err instanceof Error ? err.message : String(err));
+          printTypedError(err);
           bus.emit({
             type: 'error',
             source: 'cli',
@@ -102,6 +104,10 @@ program
             stack: err instanceof Error ? err.stack : undefined,
             timestamp: Date.now(),
           });
+          if (config.crashReportOnError) {
+            const path = await writeCrashReport(err, { cwd: process.cwd(), task, model: config.model });
+            if (path) process.stderr.write(chalk.gray(`  crash report written to ${path}\n`));
+          }
           process.exit(1);
         }
       } finally {
@@ -182,6 +188,6 @@ program
   });
 
 program.parseAsync(process.argv).catch((err: unknown) => {
-  printError(err instanceof Error ? err.message : String(err));
+  printTypedError(err);
   process.exit(1);
 });

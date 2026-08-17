@@ -16,6 +16,8 @@ const DEFAULTS: CodeGruntConfig = {
   reasoningEffort: 'medium',
   autoThinkingMode: true,
   autoCompact: true,
+  crashReportOnError: false,
+  theme: 'dark',
 };
 
 async function loadConfigFile(): Promise<Partial<CodeGruntConfig>> {
@@ -79,6 +81,8 @@ export async function loadConfig(): Promise<CodeGruntConfig> {
     searxngUrl: process.env.CODEGRUNT_SEARXNG_URL ?? fileConfig.searxngUrl,
     autoThinkingMode: envBool("CODEGRUNT_AUTO_THINKING", fileConfig.autoThinkingMode ?? true),
     autoCompact: envBool("CODEGRUNT_AUTO_COMPACT", fileConfig.autoCompact ?? true),
+    crashReportOnError: envBool("CODEGRUNT_CRASH_REPORT", fileConfig.crashReportOnError ?? false),
+    theme: (process.env.CODEGRUNT_THEME as 'dark' | 'light') ?? fileConfig.theme ?? 'dark',
   };
 }
 
@@ -102,6 +106,8 @@ export async function saveConfig(config: CodeGruntConfig): Promise<void> {
         searxngUrl: config.searxngUrl,
         autoThinkingMode: config.autoThinkingMode,
         autoCompact: config.autoCompact,
+        crashReportOnError: config.crashReportOnError,
+        theme: config.theme,
       },
       null,
       2,
