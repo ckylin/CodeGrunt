@@ -73,6 +73,38 @@ export function findAtTokenAtCursor(input: string, cursor: number): AtTokenMatch
   return { token, start, end };
 }
 
+// Fuzzy match: every character of `query` must appear in `target` in order
+// (not necessarily contiguous), so e.g. "cfg" matches "config" and "ssn"
+// matches "sessions". Returns null when the query doesn't match at all, or
+// a score where higher = better; a prefix match always outranks a contiguous
+// substring match, which always outranks a scattered subsequence match.
+// Empty query matches everything with score 0 (used for a bare "/").
+export function fuzzyScore(query: string, target: string): number | null {
+  if (query.length === 0) return 0;
+  const q = query.toLowerCase();
+  const t = target.toLowerCase();
+
+  if (t.startsWith(q)) return 10000 - t.length;
+
+  const idx = t.indexOf(q);
+  if (idx !== -1) return 5000 - idx - t.length;
+
+  let searchFrom = 0;
+  let score = 0;
+  let prevMatchIndex = -2;
+  for (const ch of q) {
+    const found = t.indexOf(ch, searchFrom);
+    if (found === -1) return null;
+    // Consecutive matches (no gap since the last matched char) score higher
+    // than scattered ones — "mdl" matching "m-o-d-e-l" beats "m...d...l".
+    score += found === prevMatchIndex + 1 ? 3 : 1;
+    prevMatchIndex = found;
+    searchFrom = found + 1;
+  }
+  // Earlier matches rank slightly above later ones for an otherwise-equal score.
+  return score - prevMatchIndex * 0.01;
+}
+
 export function getAutocompleteItems(
   input: string,
   cursor: number,
@@ -80,18 +112,30 @@ export function getAutocompleteItems(
   skills: Skill[],
 ): DropdownItem[] {
   if (input.startsWith('/')) {
-    const query = input.toLowerCase();
-    const builtins: DropdownItem[] = SLASH_COMMANDS
-      .filter(c => c.name.startsWith(query) || c.name.includes(query.slice(1)))
+    const query = input.slice(1).toLowerCase();
+
+    const scoredBuiltins = SLASH_COMMANDS
+      .map(c => ({ c, score: fuzzyScore(query, c.name.slice(1)) }))
+      .filter((x): x is { c: typeof SLASH_COMMANDS[number]; score: number } => x.score !== null)
+      .map(({ c, score }) => ({
+        item: { value: c.name, label: c.name, desc: c.desc, kind: 'builtin' as const },
+        score,
+      }));
+
+    const scoredSkills = skills
+      .map(s => ({ s, score: fuzzyScore(query, s.name) }))
+      .filter((x): x is { s: Skill; score: number } => x.score !== null)
+      .map(({ s, score }) => ({
+        item: { value: '/' + s.name, label: '/' + s.name, desc: s.description ?? '', kind: 'skill' as const },
+        score,
+      }));
+
+    // Array.prototype.sort is stable, so ties keep declaration order
+    // (builtins first, in BUILTIN_COMMANDS order) rather than reshuffling.
+    return [...scoredBuiltins, ...scoredSkills]
+      .sort((a, b) => b.score - a.score)
       .slice(0, 8)
-      .map(c => ({ value: c.name, label: c.name, desc: c.desc, kind: 'builtin' as const }));
-
-    const skillItems: DropdownItem[] = skills
-      .filter(s => ('/' + s.name).startsWith(query))
-      .slice(0, Math.max(0, 8 - builtins.length))
-      .map(s => ({ value: '/' + s.name, label: '/' + s.name, desc: s.description ?? '', kind: 'skill' as const }));
-
-    return [...builtins, ...skillItems];
+      .map(({ item }) => item);
   }
 
   const atMatch = findAtTokenAtCursor(input, cursor);
