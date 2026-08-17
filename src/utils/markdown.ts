@@ -1,4 +1,5 @@
 import chalk from 'chalk';
+import stringWidth from 'string-width';
 
 /**
  * Streaming Markdown renderer for terminal output.
@@ -171,8 +172,11 @@ export class MarkdownRenderer {
 
   private formatCodeBlock(code: string): string {
     const lines = code.split('\n');
-    const maxCols = Math.min(process.stdout.columns || 80, 100);
-    const innerW = Math.min(maxCols - 2, 60);
+    // Use the full terminal width (minus box borders/padding) instead of a
+    // fixed 60-col cap — code lines get WRAPPED below, never truncated, so a
+    // narrow fixed width would just mean more wrapped lines, not lost content.
+    const maxCols = process.stdout.columns || 80;
+    const innerW = Math.max(20, maxCols - 2);
 
     // Top border with language label
     const langLabel = this.codeBlockLang
@@ -184,15 +188,36 @@ export class MarkdownRenderer {
 
     for (const codeLine of lines) {
       const trimmed = codeLine.trimEnd();
-      const truncated = trimmed.length > innerW - 2
-        ? trimmed.slice(0, innerW - 5) + '…'
-        : trimmed;
-      const padded = truncated + ' '.repeat(Math.max(0, innerW - 2 - truncated.length));
-      out += muted('│ ') + chalk.white(padded) + muted(' │') + '\n';
+      for (const wrapped of this.wrapToWidth(trimmed, innerW - 2)) {
+        const padded = wrapped + ' '.repeat(Math.max(0, innerW - 2 - stringWidth(wrapped)));
+        out += muted('│ ') + chalk.white(padded) + muted(' │') + '\n';
+      }
     }
 
     out += muted('╰' + '─'.repeat(innerW) + '╯');
     return out;
+  }
+
+  /** Splits a line into chunks that each fit within maxW display columns,
+   *  preserving all content (no truncation) — always returns at least one
+   *  chunk (empty string for an empty line). */
+  private wrapToWidth(s: string, maxW: number): string[] {
+    if (s.length === 0) return [''];
+    const chunks: string[] = [];
+    let cur = '';
+    let w = 0;
+    for (const ch of s) {
+      const cw = stringWidth(ch);
+      if (w + cw > maxW && cur.length > 0) {
+        chunks.push(cur);
+        cur = '';
+        w = 0;
+      }
+      cur += ch;
+      w += cw;
+    }
+    if (cur.length > 0) chunks.push(cur);
+    return chunks.length > 0 ? chunks : [''];
   }
 
   private isTableRow(line: string): boolean {
@@ -211,10 +236,6 @@ export class MarkdownRenderer {
     return row.trimEnd().slice(1, -1).split('|').map(c => c.trim());
   }
 
-  private stripAnsi(s: string): string {
-    return s.replace(/\x1b\[[0-9;]*m/g, '');
-  }
-
   private renderTable(rows: string[]): string {
     const headerRaw = this.parseTableRow(rows[0]);
     const dataRaw = rows.slice(2).map(r => this.parseTableRow(r));
@@ -225,17 +246,17 @@ export class MarkdownRenderer {
     const colCount = header.length;
     const widths: number[] = [];
     for (let i = 0; i < colCount; i++) {
-      let maxW = this.stripAnsi(header[i]).length;
+      let maxW = stringWidth(header[i]);
       for (const row of data) {
-        const w = this.stripAnsi(row[i] ?? '').length;
+        const w = stringWidth(row[i] ?? '');
         if (w > maxW) maxW = w;
       }
       widths.push(Math.max(maxW, 3));
     }
 
     const pad = (s: string, w: number): string => {
-      const visual = this.stripAnsi(s);
-      return s + ' '.repeat(w - visual.length);
+      const visual = stringWidth(s);
+      return s + ' '.repeat(Math.max(0, w - visual));
     };
 
     const sep = muted(' │ ');

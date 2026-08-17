@@ -4,8 +4,9 @@ import { homedir } from 'os';
 import { join } from 'path';
 import chalk from 'chalk';
 import type { CodeGruntConfig } from '../types.js';
-import { selectFromList } from './input.js';
+import { selectFromList } from '../utils/select.js';
 import { validateApiKey } from '../providers/deepseek/client.js';
+import { saveConfig } from '../config.js';
 
 const CONFIG_DIR = join(homedir(), '.codegrunt');
 const CONFIG_PATH = join(CONFIG_DIR, 'config.json');
@@ -19,12 +20,17 @@ export const DEEPSEEK_MODELS: Array<{ id: string; label: string; description: st
   {
     id: 'deepseek-v4-flash',
     label: 'DeepSeek V4 Flash',
-    description: 'Fast & cheap, great for most coding tasks',
+    description: 'Fast & cheap — used for classification and planning',
   },
   {
     id: 'deepseek-v4-pro',
     label: 'DeepSeek V4 Pro',
-    description: 'Most capable, best for complex reasoning',
+    description: 'Most capable, best for complex multi-step tasks',
+  },
+  {
+    id: 'deepseek-reasoner',
+    label: 'DeepSeek R1 Reasoner',
+    description: 'Chain-of-thought reasoning, 1M context — for hard problems',
   },
 ];
 
@@ -77,25 +83,9 @@ export async function runSetup(existingConfig: CodeGruntConfig): Promise<CodeGru
   const config: CodeGruntConfig = { ...existingConfig, apiKey, model };
   const selected = DEEPSEEK_MODELS.find((m) => m.id === model);
 
-  await mkdir(CONFIG_DIR, { recursive: true });
-  await writeFile(
-    CONFIG_PATH,
-    JSON.stringify(
-      {
-        apiKey,
-        model,
-        maxTokens: config.maxTokens,
-        temperature: config.temperature,
-        reasoningEffort: config.reasoningEffort,
-        topP: config.topP,
-        frequencyPenalty: config.frequencyPenalty,
-        presencePenalty: config.presencePenalty,
-      },
-      null,
-      2,
-    ),
-    'utf-8',
-  );
+  // Delegate to the canonical saveConfig in config.ts (single source of truth
+  // for config persistence — avoids duplicate serialization logic).
+  await saveConfig(config);
 
   console.log(
     chalk.green(`\n✓ Config saved`) +

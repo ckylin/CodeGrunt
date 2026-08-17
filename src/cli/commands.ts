@@ -3,7 +3,7 @@ import type { LLMProvider, Message, CodeGruntConfig } from '../types.js';
 import type { ContextManager } from '../core/context/manager.js';
 import { DEEPSEEK_MODELS } from './setup.js';
 import { getSessionUsage } from '../core/usage.js';
-import { printBalanceAndUsage, formatDualCurrency, PRICING } from '../utils/billing.js';
+import { printBalanceAndUsage, formatDualCurrency, PRICING, getTodayUsage, getMonthUsage } from '../utils/billing.js';
 import type { Skill } from './skills.js';
 import { getGlobalSkillsDir, createSkill } from './skills.js';
 import { validateApiKey } from '../providers/deepseek/client.js';
@@ -12,7 +12,25 @@ import { selectFromList } from '../utils/select.js';
 import { isReasonerModel } from '../config.js';
 import { runInit } from './init.js';
 import { saveSessionSummary, loadSessionSummary, deleteEntry, listEntries } from '../core/memory/store.js';
+import { listSessions, deleteSession, formatSessionEntry } from '../core/session/store.js';
+import { getHookRegistry } from '../core/hooks/registry.js';
+import { listSnapshots, restoreSnapshot } from '../core/snapshot/index.js';
+import { getMcpManager } from '../core/mcp/manager.js';
+import { addMcpServer, removeMcpServer, loadMcpConfig } from '../core/mcp/config.js';
+import { searchMcpRegistry } from '../core/mcp/registry.js';
+import type { McpServerConfig } from '../core/mcp/types.js';
+import { getToolRegistry } from '../core/tools/registry.js';
+import { buildIndex, loadIndex } from '../core/index/index.js';
+import { exportSwebenchPrediction } from '../core/swebench/export.js';
+import { loadWorkspacePermissions, setToolPermission, resetToolPermission, type PermissionAction } from '../core/permissions/index.js';
+import {
+  loadBranchTree, saveBranchTree, getCurrentBranchId, getBranchList,
+  forkBranch, switchToBranch, deleteBranch, visualizeBranchTree, getCheckpoint,
+} from '../core/session/branching.js';
+import { getSubagentCacheStats, clearSubagentCache } from '../core/agent/subagent.js';
+import { printPaged } from '../utils/pager.js';
 
+import { handleBranch, handleTree, handleSwitchBranch, handleSubagentCache } from './branch-commands.js';
 
 export interface CommandDescriptor {
   name: string;
@@ -25,14 +43,33 @@ export const BUILTIN_COMMANDS: CommandDescriptor[] = [
   { name: 'model',   desc: 'Switch model interactively' },
   { name: 'config',  desc: 'View or change config (temperature, reasoning, etc.)' },
   { name: 'skills',  desc: 'List and manage skills' },
-  { name: 'compact', desc: 'Summarize and compress conversation history to save tokens' },
-  { name: 'memory',  desc: 'Show persistent memory entries and last session summary' },
+  { name: 'compact',  desc: 'Summarize and compress conversation history to save tokens' },
+  { name: 'resume',   desc: 'Resume a previous conversation session' },
+  { name: 'sessions', desc: 'List and manage saved sessions' },
+  { name: 'status',   desc: 'Show current session status and cache statistics' },
+  { name: 'memory',   desc: 'Show persistent memory entries and last session summary' },
+  { name: 'hooks',    desc: 'List loaded hook scripts from ~/.codegrunt/hooks/' },
+  { name: 'trust',    desc: 'Set trust mode: plan (read-only) / code (confirm) / auto (yes-all)' },
+  { name: 'restore',  desc: 'Restore working tree to a previous snapshot (/restore lists available)' },
+  { name: 'baseurl',  desc: 'Set custom DeepSeek API base URL (for mirrors / proxies)' },
+  { name: 'search-engine', desc: 'Set web search engine: mojeek (default) / searxng / duckduckgo' },
+  { name: 'mcp',       desc: 'Manage MCP servers: /mcp list | add | remove | search' },
+  { name: 'index',     desc: 'Build or update the code symbol index for this project (--semantic for vector search)' },
+  { name: 'swebench',  desc: 'Export current session diff as a SWE-bench prediction (/swebench <instance-id>)' },
+  { name: 'permissions', desc: 'View or set per-tool permissions: /permissions | set <tool> <allow|deny|ask> | reset <tool>' },
   { name: 'review',  desc: 'Review session changes for logic issues' },
   { name: 'clear',   desc: 'Clear conversation context' },
   { name: 'cost',    desc: 'Show session token usage and cost' },
+  { name: 'cache',   desc: 'Show detailed DeepSeek prefix cache performance statistics' },
+  { name: 'cost-report', desc: 'Show aggregated cost report with per-model breakdown' },
   { name: 'balance', desc: 'Show account balance & usage' },
   { name: 'help',    desc: 'Show full help message' },
-
+  { name: 'branch',  desc: 'Create a session branch from a historical turn: /branch <turn-number> [label]' },
+  { name: 'tree',    desc: 'Visualize the session branch tree' },
+  { name: 'switch',  desc: 'Switch to a different branch: /switch <branch-id>' },
+  { name: 'subagent-cache', desc: 'Show or clear the sub-agent result cache' },
+  { name: 'effort',  desc: 'Set reasoning effort: low (flash) / medium (auto) / high (pro+thinking)' },
+  { name: 'theme',   desc: 'Set TUI color theme: dark (default) / light' },
 ];
 
 export type SlashCommandResult =
@@ -50,6 +87,7 @@ export async function handleSlashCommand(
   provider: LLMProvider,
   context: ContextManager,
   skills: Skill[] = [],
+  currentSessionId?: string,
 ): Promise<SlashCommandResult> {
   if (!input.startsWith('/')) return { type: 'not_a_command' };
 
@@ -58,7 +96,7 @@ export async function handleSlashCommand(
 
   switch (cmd.toLowerCase()) {
     case 'help':
-      printHelp(config, skills);
+      await printHelp(config, skills);
       return { type: 'handled' };
 
     case 'clear':
@@ -68,6 +106,22 @@ export async function handleSlashCommand(
 
     case 'compact':
       await compactContext(context, config, provider, cwd);
+      return { type: 'handled' };
+
+    case 'branch':
+      await handleBranch(args, cwd, context, currentSessionId);
+      return { type: 'handled' };
+
+    case 'tree':
+      await handleTree(cwd, currentSessionId);
+      return { type: 'handled' };
+
+    case 'switch':
+      await handleSwitchBranch(args, cwd, context);
+      return { type: 'handled' };
+
+    case 'subagent-cache':
+      handleSubagentCache(args);
       return { type: 'handled' };
 
     case 'init':
@@ -81,6 +135,9 @@ export async function handleSlashCommand(
     case 'effort':
       return switchReasoningEffort(args, config);
 
+    case 'theme':
+      return switchTheme(args, config);
+
     case 'token':
     case 'apikey':
       return await switchToken(args, config);
@@ -92,13 +149,28 @@ export async function handleSlashCommand(
       printSessionCost(config.model);
       return { type: 'handled' };
 
+    case 'cache':
+      printCacheStats();
+      return { type: 'handled' };
+
+    case 'cost-report':
+      await printCostReport(config.model);
+      return { type: 'handled' };
+
+    case 'status':
+      printSessionStatus(config.model, context, currentSessionId, config);
+      return { type: 'handled' };
+
     case 'balance':
       await printBalanceAndUsage(config.apiKey, config.baseURL, config.model);
       return { type: 'handled' };
 
-
     case 'skills':
       return await handleSkills(rest, skills);
+
+    case 'sessions':
+      await handleSessions(rest, cwd);
+      return { type: 'handled' };
 
     case 'review':
       await reviewContext(context, config, provider);
@@ -106,6 +178,39 @@ export async function handleSlashCommand(
 
     case 'memory':
       await handleMemoryCommand(rest, cwd);
+      return { type: 'handled' };
+
+    case 'hooks':
+      printHooks();
+      return { type: 'handled' };
+
+    case 'trust':
+      return switchTrustMode(args, config);
+
+    case 'restore':
+      await handleRestore(rest, cwd);
+      return { type: 'handled' };
+
+    case 'baseurl':
+      return handleBaseUrl(args, config);
+
+    case 'search-engine':
+      return handleSearchEngine(args, config);
+
+    case 'mcp':
+      await handleMcp(rest);
+      return { type: 'handled' };
+
+    case 'index':
+      await handleIndex(cwd, args);
+      return { type: 'handled' };
+
+    case 'swebench':
+      await handleSwebench(rest, cwd, config);
+      return { type: 'handled' };
+
+    case 'permissions':
+      await handlePermissions(rest, cwd);
       return { type: 'handled' };
 
     default: {
@@ -117,7 +222,7 @@ export async function handleSlashCommand(
 
 // ── /help ───────────────────────────────────────────────────────────────────
 
-function printHelp(config: CodeGruntConfig, skills: Skill[] = []): void {
+async function printHelp(config: CodeGruntConfig, skills: Skill[] = []): Promise<void> {
   const builtinLines = BUILTIN_COMMANDS.map(
     (c) => `  ${chalk.cyan('/' + c.name)}${' '.repeat(Math.max(1, 18 - c.name.length))}${chalk.gray(c.desc)}`
   ).join('\n');
@@ -128,7 +233,7 @@ function printHelp(config: CodeGruntConfig, skills: Skill[] = []): void {
         `  ${chalk.cyan('/' + s.name)}${' '.repeat(Math.max(1, 18 - s.name.length - 1))}${s.description ? chalk.gray(` — ${s.description}`) : chalk.gray(`(${s.source})`)}`
       ).join('\n') + '\n'
     : '';
-  console.log(`
+  await printPaged(`
 ${chalk.bold('Slash Commands')}
 
   ${chalk.cyan('/init')}              Analyze the codebase and generate a CODEGRUNT.md project guide
@@ -140,6 +245,11 @@ ${chalk.bold('Slash Commands')}
   ${chalk.cyan('/reasoning')}         Set reasoning effort for R1 models (low/medium/high)
   ${chalk.cyan('/effort <level>')}    Shortcut: /effort low | /effort medium | /effort high
   ${chalk.cyan('/cost')}              Show session token usage and cost (DeepSeek pricing)
+  ${chalk.cyan('/status')}            Show session status, cache hit rate, and context size
+  ${chalk.cyan('/sessions')}          List saved sessions for this directory
+  ${chalk.cyan('/sessions delete <id>')} Delete a saved session
+  ${chalk.cyan('/resume')}            Resume a previous session (interactive picker)
+  ${chalk.cyan('/resume <id>')}       Resume a specific session by ID
   ${chalk.cyan('/balance')}           Show account balance, today's & this month's usage
   ${chalk.cyan('/skills')}            List and manage skills (create, list)
   ${chalk.cyan('/review')}            Review session changes for logic issues
@@ -148,6 +258,15 @@ ${chalk.bold('Slash Commands')}
   ${chalk.cyan('/compact')}           Summarize and compress conversation history to save tokens
   ${chalk.cyan('/memory')}            Show persistent memory entries and last session summary
   ${chalk.cyan('/memory delete <id>')} Delete a memory entry by id
+  ${chalk.cyan('/hooks')}             List loaded hook scripts
+  ${chalk.cyan('/trust')}             Set trust mode: plan (read-only) / code (confirm) / auto (yes-all)
+  ${chalk.cyan('/trust <mode>')}      Switch directly: /trust plan | /trust code | /trust auto
+  ${chalk.cyan('/restore')}           List and restore working tree to a previous snapshot
+  ${chalk.cyan('/restore <hash>')}    Restore to a specific snapshot by hash prefix
+  ${chalk.cyan('/swebench <id>')}     Export current session diff as a SWE-bench prediction (JSONL)
+  ${chalk.cyan('/permissions')}       Show per-tool permission overrides
+  ${chalk.cyan('/permissions set <tool> <allow|deny|ask>')}  Set a tool's permission
+  ${chalk.cyan('/permissions reset <tool>')}                 Remove a tool's permission override
 ${skillsSection}
 ${chalk.bold('@ References')}
 
@@ -170,7 +289,7 @@ ${chalk.bold('Other')}
 
 function printSessionCost(model: string): void {
   const usage = getSessionUsage();
-  const pricing = PRICING[model] ?? PRICING['deepseek-chat'];
+  const pricing = PRICING[model] ?? PRICING['deepseek-v4-flash'];
 
   const inputCost = (usage.inputTokens / 1_000_000) * pricing.prompt;
   const outputCost = (usage.outputTokens / 1_000_000) * pricing.completion;
@@ -188,6 +307,130 @@ ${chalk.gray('─'.repeat(30))}
   ${chalk.gray('Output cost:')}  ${formatDualCurrency(outputCost)}${cacheSavings > 0 ? chalk.green(`\n  ${chalk.gray('Cache saved:')}  -${formatDualCurrency(cacheSavings)}`) : ''}
   ${chalk.bold('Session cost:')} ${formatDualCurrency(totalCost)}
 `);
+}
+
+// ── /cache ───────────────────────────────────────────────────────────────────
+
+function printCacheStats(): void {
+  const usage = getSessionUsage();
+  const totalInput = usage.inputTokens + usage.cacheHitTokens;
+  const hitRate = totalInput > 0 ? (usage.cacheHitTokens / totalInput * 100).toFixed(1) : '0.0';
+  const pricing = PRICING['deepseek-v4-flash'] ?? { prompt: 0.14, completion: 0.28, cacheHit: 0.0028 };
+  const saved = (usage.cacheHitTokens / 1_000_000) * (pricing.prompt - pricing.cacheHit);
+
+  console.log(`
+${chalk.bold('Cache Statistics')}
+  ${chalk.gray('Cache hit tokens:')} ${usage.cacheHitTokens.toLocaleString()}
+  ${chalk.gray('Cache hit rate:')}   ${chalk.green(hitRate + '%')}
+  ${chalk.gray('Cost saved:')}       ${chalk.green(formatDualCurrency(saved))}
+`);
+}
+
+// ── /cost-report ─────────────────────────────────────────────────────────────
+
+async function printCostReport(model: string): Promise<void> {
+  const [today, month] = await Promise.all([
+    getTodayUsage(),
+    getMonthUsage(),
+  ]);
+
+  const pricing = PRICING[model] ?? PRICING['deepseek-v4-flash'];
+
+  function formatStats(label: string, stats: { inputTokens: number; outputTokens: number; cacheHitTokens: number; cost: number }): string {
+    const totalTokens = stats.inputTokens + stats.outputTokens;
+    const inputCost = (stats.inputTokens / 1_000_000) * pricing.prompt;
+    const outputCost = (stats.outputTokens / 1_000_000) * pricing.completion;
+    const cacheSavings = (stats.cacheHitTokens / 1_000_000) * (pricing.prompt - pricing.cacheHit);
+    const netCost = inputCost + outputCost - cacheSavings;
+
+    return `${chalk.bold(label)}
+  ${chalk.gray('Input tokens:')}   ${stats.inputTokens.toLocaleString()}
+  ${chalk.gray('Output tokens:')}  ${stats.outputTokens.toLocaleString()}
+  ${chalk.gray('Cache hits:')}     ${stats.cacheHitTokens.toLocaleString()}
+  ${chalk.gray('Total tokens:')}   ${totalTokens.toLocaleString()}
+  ${chalk.gray('Gross cost:')}     ${formatDualCurrency(inputCost + outputCost)}
+  ${chalk.gray('Cache saved:')}    ${chalk.green(formatDualCurrency(cacheSavings))}
+  ${chalk.gray('Net cost:')}       ${formatDualCurrency(netCost)}`;
+  }
+
+  console.log(`
+${chalk.bold('Cost Report')}
+  ${chalk.gray('Model:')} ${chalk.cyan(model)}
+`);
+
+  console.log(formatStats('📆 Today', today));
+  console.log();
+  console.log(formatStats('📅 This Month', month));
+  console.log();
+}
+
+// ── /status ──────────────────────────────────────────────────────────────────
+
+function printSessionStatus(model: string, context: ContextManager, sessionId?: string, config?: CodeGruntConfig): void {
+  const usage = getSessionUsage();
+  const totalInput = usage.inputTokens + usage.cacheHitTokens;
+  const hitRate = totalInput > 0 ? (usage.cacheHitTokens / totalInput * 100).toFixed(1) : '0.0';
+  const contextTokens = context.estimatedTokenCount();
+
+  const sessionLine = sessionId
+    ? chalk.cyan(sessionId.slice(0, 8) + '…')
+    : chalk.gray('(not saved yet)');
+
+  const trustMode = config?.trustMode ?? 'code';
+  const trustLabel = trustMode === 'plan'
+    ? chalk.yellow('plan (read-only)')
+    : trustMode === 'auto'
+      ? chalk.green('auto (yes-all)')
+      : chalk.cyan('code (confirm)');
+
+  console.log(`
+${chalk.bold('Session Status')}
+  ${chalk.gray('Model:')}           ${chalk.cyan(model)}
+  ${chalk.gray('Session ID:')}      ${sessionLine}
+  ${chalk.gray('Trust mode:')}      ${trustLabel}
+  ${chalk.gray('Context size:')}    ~${contextTokens.toLocaleString()} tokens
+  ${chalk.gray('Messages:')}        ${context.getMessages().filter(m => m.role !== 'system').length}
+${chalk.gray('─'.repeat(30))}
+${chalk.bold('Cache Statistics')}
+  ${chalk.gray('Cache hit rate:')}  ${chalk.green(hitRate + '%')}  (${usage.cacheHitTokens.toLocaleString()} hits / ${totalInput.toLocaleString()} total input)
+  ${chalk.gray('Cache misses:')}    ${usage.cacheMissTokens.toLocaleString()} tokens
+`);
+}
+
+// ── /sessions ────────────────────────────────────────────────────────────────
+
+async function handleSessions(rest: string[], cwd: string): Promise<void> {
+  const sub = rest[0]?.toLowerCase();
+
+  if (sub === 'delete' && rest[1]) {
+    const deleted = await deleteSession(rest[1]);
+    if (deleted) {
+      console.log(chalk.green(`✓ Deleted session ${rest[1]}`));
+    } else {
+      console.log(chalk.yellow(`Session "${rest[1]}" not found.`));
+    }
+    return;
+  }
+
+  const sessions = await listSessions(cwd);
+
+  if (sessions.length === 0) {
+    console.log(chalk.gray('\nNo saved sessions for this directory.'));
+    console.log(chalk.gray('Sessions are saved automatically after each turn.\n'));
+    return;
+  }
+
+  const lines = [
+    '',
+    `${chalk.bold('Saved Sessions')} ${chalk.gray(`(${sessions.length})`)}`,
+    '',
+    ...sessions.map((s) => `  ${chalk.cyan(s.id.slice(0, 8))}  ${formatSessionEntry(s)}`),
+    '',
+    chalk.gray('/resume <id>  to restore a session'),
+    chalk.gray('/sessions delete <id>  to remove a session'),
+    '',
+  ];
+  await printPaged(lines.join('\n'));
 }
 
 async function switchReasoningEffort(
@@ -226,6 +469,37 @@ async function switchReasoningEffort(
     type: 'config_changed',
     config: { ...config, reasoningEffort: selected as 'low' | 'medium' | 'high' },
   };
+}
+
+async function switchTheme(
+  arg: string,
+  config: CodeGruntConfig,
+): Promise<SlashCommandResult> {
+  const validThemes = ['dark', 'light'] as const;
+  const normalized = arg.toLowerCase();
+
+  if (normalized && validThemes.includes(normalized as (typeof validThemes)[number])) {
+    const theme = normalized as 'dark' | 'light';
+    console.log(chalk.green(`✓ Theme set to ${chalk.bold(theme)}`));
+    return { type: 'config_changed', config: { ...config, theme } };
+  }
+
+  const selected = await selectFromList(
+    'Select theme',
+    [
+      { value: 'dark', label: 'Dark', desc: 'Default — accent tuned for dark terminal backgrounds' },
+      { value: 'light', label: 'Light', desc: 'Darker accent/muted colors for light terminal backgrounds' },
+    ],
+    config.theme ?? 'dark',
+  );
+
+  if (!selected || selected === config.theme) {
+    console.log(chalk.gray('Theme unchanged.'));
+    return { type: 'handled' };
+  }
+
+  console.log(chalk.green(`✓ Theme set to ${chalk.bold(selected)}`));
+  return { type: 'config_changed', config: { ...config, theme: selected as 'dark' | 'light' } };
 }
 
 async function switchToken(
@@ -613,26 +887,29 @@ async function handleMemoryCommand(rest: string[], cwd: string): Promise<void> {
     listEntries(),
   ]);
 
+  const lines: string[] = [];
+
   if (summary) {
-    console.log(`\n${chalk.bold('Last Session Summary')}\n`);
-    console.log(chalk.gray(summary));
+    lines.push('', chalk.bold('Last Session Summary'), '', chalk.gray(summary));
   } else {
-    console.log(chalk.gray('\nNo session summary saved yet. Run /compact to create one.'));
+    lines.push('', chalk.gray('No session summary saved yet. Run /compact to create one.'));
   }
 
   if (entries.length > 0) {
-    console.log(`\n${chalk.bold('Memory Entries')}\n`);
+    lines.push('', chalk.bold('Memory Entries'), '');
     for (const e of entries) {
-      console.log(`  ${chalk.cyan(`[${e.id}]`)} ${chalk.bold(e.name)} ${chalk.gray(`(${e.type})`)}`);
-      console.log(`  ${chalk.gray(e.description)}`);
+      lines.push(`  ${chalk.cyan(`[${e.id}]`)} ${chalk.bold(e.name)} ${chalk.gray(`(${e.type})`)}`);
+      lines.push(`  ${chalk.gray(e.description)}`);
       const preview = e.body.length > 120 ? e.body.slice(0, 120) + '…' : e.body;
-      console.log(`  ${preview}\n`);
+      lines.push(`  ${preview}`, '');
     }
-    console.log(chalk.gray('  /memory delete <id>   to remove an entry'));
+    lines.push(chalk.gray('  /memory delete <id>   to remove an entry'));
   } else {
-    console.log(chalk.gray('\nNo memory entries. Ask the agent to remember something using memory_write.'));
+    lines.push('', chalk.gray('No memory entries. Ask the agent to remember something using memory_write.'));
   }
-  console.log('');
+  lines.push('');
+
+  await printPaged(lines.join('\n'));
 }
 
 // ── /skills ─────────────────────────────────────────────────────────────────
@@ -704,7 +981,7 @@ async function handleSkills(
     console.log(`\n${chalk.gray('No skills loaded.')}`);
     console.log(chalk.gray(`Create one with ${chalk.cyan('/skills create <name>')}`));
     console.log(chalk.gray(`Or add .md files to ${chalk.gray(getGlobalSkillsDir())}`));
-    console.log(chalk.gray(`Project skills: ${chalk.gray('.codegrunt/skills/')}`));
+    console.log(chalk.gray(`Project skills: ${chalk.gray('.codegrunt/skills/')} (also reads .claude/skills/ for Claude Code compat)`));
     return { type: 'handled' };
   }
 
@@ -722,11 +999,423 @@ async function handleSkills(
   console.log(chalk.gray(`Create: ${chalk.cyan('/skills create <name>')}`));
   console.log(chalk.gray(`Global dir: ${chalk.gray(getGlobalSkillsDir())}`));
   console.log(chalk.gray(`Project dir: ${chalk.gray('.codegrunt/skills/')}`));
+  console.log(chalk.gray(`Claude-format dir: ${chalk.gray('.claude/skills/')}`));
 
   return { type: 'handled' };
 }
 
-// ── /review ──────────────────────────────────────────────────────────────────
+// ── /search-engine ────────────────────────────────────────────────────────────
+
+async function handleSearchEngine(arg: string, config: CodeGruntConfig): Promise<SlashCommandResult> {
+  type Engine = 'mojeek' | 'searxng' | 'duckduckgo';
+  const ENGINES: Engine[] = ['mojeek', 'searxng', 'duckduckgo'];
+  const DESCS: Record<Engine, string> = {
+    mojeek: 'privacy-first, no API key required (default)',
+    searxng: 'self-hosted metasearch — set CODEGRUNT_SEARXNG_URL',
+    duckduckgo: 'DuckDuckGo instant answers (rate-limited)',
+  };
+
+  const current = config.searchEngine ?? 'mojeek';
+
+  if (arg && ENGINES.includes(arg as Engine)) {
+    const engine = arg as Engine;
+    console.log(chalk.green(`✓ Search engine: ${chalk.cyan(engine)}`) + chalk.gray(`  — ${DESCS[engine]}`));
+    if (engine === 'searxng' && !config.searxngUrl) {
+      console.log(chalk.yellow('  Set your SearXNG URL with: CODEGRUNT_SEARXNG_URL=http://localhost:8080'));
+    }
+    return { type: 'config_changed', config: { ...config, searchEngine: engine } };
+  }
+
+  const selected = await selectFromList(
+    'Select web search engine',
+    ENGINES.map(e => ({ value: e, label: e, desc: DESCS[e] })),
+    current,
+  );
+
+  if (!selected || selected === current) {
+    console.log(chalk.gray('Search engine unchanged.'));
+    return { type: 'handled' };
+  }
+
+  const engine = selected as Engine;
+  console.log(chalk.green(`✓ Search engine: ${chalk.cyan(engine)}`));
+  return { type: 'config_changed', config: { ...config, searchEngine: engine } };
+}
+
+// ── /baseurl ──────────────────────────────────────────────────────────────────
+function handleBaseUrl(arg: string, config: CodeGruntConfig): SlashCommandResult {
+  const DEFAULT_URL = 'https://api.deepseek.com';
+  const url = arg.trim();
+
+  if (!url) {
+    console.log(`\n${chalk.bold('Current base URL:')} ${chalk.cyan(config.baseURL ?? DEFAULT_URL)}`);
+    console.log(chalk.gray('Usage: /baseurl <url>  — set a custom DeepSeek API base URL'));
+    console.log(chalk.gray(`       /baseurl reset  — restore to ${DEFAULT_URL}\n`));
+    return { type: 'handled' };
+  }
+
+  if (url === 'reset') {
+    console.log(chalk.green(`✓ Base URL reset to ${chalk.cyan(DEFAULT_URL)}`));
+    return { type: 'config_changed', config: { ...config, baseURL: DEFAULT_URL } };
+  }
+
+  try {
+    new URL(url); // validate
+  } catch {
+    console.log(chalk.yellow(`Invalid URL: ${url}`));
+    return { type: 'handled' };
+  }
+
+  console.log(chalk.green(`✓ Base URL set to ${chalk.cyan(url)}`));
+  console.log(chalk.gray('  Restart the session for the new URL to take effect on the provider.'));
+  return { type: 'config_changed', config: { ...config, baseURL: url } };
+}
+
+// ── /trust ───────────────────────────────────────────────────────────────────
+
+async function switchTrustMode(arg: string, config: CodeGruntConfig): Promise<SlashCommandResult> {
+  const MODES = ['plan', 'code', 'auto'] as const;
+  type TrustMode = typeof MODES[number];
+
+  const DESCRIPTIONS: Record<TrustMode, string> = {
+    plan: 'read-only — all write/shell tools are blocked',
+    code: 'require confirmation for each destructive operation (default)',
+    auto: 'auto-approve all operations for this session',
+  };
+
+  if (arg && MODES.includes(arg as TrustMode)) {
+    const mode = arg as TrustMode;
+    const label = mode === 'plan' ? chalk.yellow(mode) : mode === 'auto' ? chalk.green(mode) : chalk.cyan(mode);
+    console.log(chalk.green('✓ Trust mode: ') + label + chalk.gray(`  — ${DESCRIPTIONS[mode]}`));
+    return { type: 'config_changed', config: { ...config, trustMode: mode } };
+  }
+
+  const selected = await selectFromList(
+    'Select trust mode',
+    MODES.map(m => ({ value: m, label: m, desc: DESCRIPTIONS[m] })),
+    config.trustMode ?? 'code',
+  );
+
+  if (!selected || selected === (config.trustMode ?? 'code')) {
+    console.log(chalk.gray('Trust mode unchanged.'));
+    return { type: 'handled' };
+  }
+
+  const mode = selected as TrustMode;
+  const label = mode === 'plan' ? chalk.yellow(mode) : mode === 'auto' ? chalk.green(mode) : chalk.cyan(mode);
+  console.log(chalk.green('✓ Trust mode: ') + label + chalk.gray(`  — ${DESCRIPTIONS[mode]}`));
+  return { type: 'config_changed', config: { ...config, trustMode: mode } };
+}
+
+// ── /hooks ───────────────────────────────────────────────────────────────────
+
+function printHooks(): void {
+  const registry = getHookRegistry();
+  const hooks = registry.list();
+  const hooksDir = `${process.env.HOME ?? process.env.USERPROFILE ?? '~'}/.codegrunt/hooks/`;
+
+  if (hooks.length === 0) {
+    console.log(`\n${chalk.gray('No hooks loaded.')}`);
+    console.log(chalk.gray(`Add scripts to ${chalk.cyan(hooksDir)}`));
+    console.log(chalk.gray('Supported events:') + ' ' + chalk.cyan('user-prompt-submit  pre-tool-use  post-tool-use  stop'));
+    console.log(chalk.gray('Supported formats:') + ' ' + chalk.cyan('.sh  .bash  .js  .mjs  .cjs'));
+    console.log(`\n${chalk.gray('Example: pre-tool-use.sh — block dangerous shell commands')}\n`);
+    return;
+  }
+
+  console.log(`\n${chalk.bold('Loaded Hooks')} ${chalk.gray(`(${hooks.length})`)}\n`);
+
+  const events = ['user-prompt-submit', 'pre-tool-use', 'post-tool-use', 'stop'] as const;
+  for (const event of events) {
+    const matching = hooks.filter(h => h.eventType === event);
+    if (matching.length === 0) continue;
+    console.log(`  ${chalk.cyan(event)}`);
+    for (const h of matching) {
+      console.log(`    ${chalk.gray('→')} ${h.name}`);
+    }
+  }
+
+  console.log(`\n${chalk.gray(`Hook directory: ${hooksDir}`)}\n`);
+}
+
+// ── /restore ─────────────────────────────────────────────────────────────────
+
+async function handleRestore(rest: string[], cwd: string): Promise<void> {
+  const snapshots = await listSnapshots(cwd);
+
+  if (snapshots.length === 0) {
+    console.log(chalk.gray('\nNo snapshots available for this directory.'));
+    console.log(chalk.gray('Snapshots are created automatically after each coding turn.\n'));
+    return;
+  }
+
+  const targetHash = rest[0];
+  if (targetHash) {
+    const entry = snapshots.find(s => s.hash.startsWith(targetHash));
+    if (!entry) {
+      console.log(chalk.yellow(`Snapshot "${targetHash}" not found.`));
+      return;
+    }
+    try {
+      await restoreSnapshot(cwd, entry.hash);
+      console.log(chalk.green(`✓ Restored to snapshot ${chalk.cyan(entry.hash)}`));
+      console.log(chalk.gray(`  ${entry.timestamp}  ${entry.message}`));
+    } catch (err) {
+      console.log(chalk.red(`Restore failed: ${err instanceof Error ? err.message : String(err)}`));
+    }
+    return;
+  }
+
+  // Interactive picker
+  const choices = snapshots.map(s => ({
+    label: `${chalk.cyan(s.hash)}  ${chalk.gray(s.timestamp)}  ${s.message}`,
+    value: s.hash,
+  }));
+  const picked = await selectFromList('Restore to snapshot:', choices);
+  if (!picked) return;
+
+  const entry = snapshots.find(s => s.hash === picked)!;
+  try {
+    await restoreSnapshot(cwd, entry.hash);
+    console.log(chalk.green(`✓ Restored to snapshot ${chalk.cyan(entry.hash)}`));
+    console.log(chalk.gray(`  ${entry.timestamp}  ${entry.message}`));
+    console.log(chalk.gray('  Files restored. Review changes with git diff.\n'));
+  } catch (err) {
+    console.log(chalk.red(`Restore failed: ${err instanceof Error ? err.message : String(err)}`));
+  }
+}
+
+// ── /swebench ─────────────────────────────────────────────────────────────────
+// /swebench <instance-id>       — export current working-tree diff as a SWE-bench prediction
+// /swebench run <instance-id>   — alias for the above
+
+async function handleSwebench(rest: string[], cwd: string, config: CodeGruntConfig): Promise<void> {
+  const args = rest[0]?.toLowerCase() === 'run' ? rest.slice(1) : rest;
+  const instanceId = args[0];
+
+  if (!instanceId) {
+    console.log(chalk.yellow('Usage: /swebench <instance-id>'));
+    return;
+  }
+
+  try {
+    const { outputPath, patchLength } = await exportSwebenchPrediction({
+      cwd,
+      instanceId,
+      modelName: config.model,
+    });
+    console.log(chalk.green(`✓ Exported prediction for ${chalk.cyan(instanceId)}`));
+    console.log(chalk.gray(`  ${outputPath}  (${patchLength} bytes of diff)`));
+  } catch (err) {
+    console.log(chalk.red(`SWE-bench export failed: ${err instanceof Error ? err.message : String(err)}`));
+  }
+}
+
+// ── /permissions ──────────────────────────────────────────────────────────────
+// /permissions                       — show current .codegrunt/permissions.json
+// /permissions set <tool> <action>   — set a tool's permission (allow|deny|ask)
+// /permissions reset <tool>          — remove a tool's permission override
+
+const PERMISSION_ACTIONS = ['allow', 'deny', 'ask'] as const;
+
+async function handlePermissions(rest: string[], cwd: string): Promise<void> {
+  const sub = rest[0]?.toLowerCase();
+
+  if (sub === 'set') {
+    const toolName = rest[1];
+    const action = rest[2]?.toLowerCase();
+    if (!toolName || !action || !PERMISSION_ACTIONS.includes(action as PermissionAction)) {
+      console.log(chalk.yellow('Usage: /permissions set <tool> <allow|deny|ask>'));
+      return;
+    }
+    const updated = await setToolPermission(cwd, toolName, action as PermissionAction);
+    console.log(chalk.green(`✓ ${toolName} → ${action}`));
+    console.log(chalk.gray(JSON.stringify(updated, null, 2)));
+    return;
+  }
+
+  if (sub === 'reset') {
+    const toolName = rest[1];
+    if (!toolName) {
+      console.log(chalk.yellow('Usage: /permissions reset <tool>'));
+      return;
+    }
+    const updated = await resetToolPermission(cwd, toolName);
+    console.log(chalk.green(`✓ Removed permission override for ${toolName}`));
+    console.log(chalk.gray(JSON.stringify(updated, null, 2)));
+    return;
+  }
+
+  // Default: show current permissions
+  const permissions = await loadWorkspacePermissions(cwd);
+  if (!permissions || Object.keys(permissions.tools).length === 0) {
+    console.log(chalk.gray('\nNo workspace permissions configured (.codegrunt/permissions.json).'));
+    console.log(chalk.gray('All tools defer to the current trust mode (/trust).\n'));
+    return;
+  }
+  console.log(chalk.bold('\nWorkspace permissions (.codegrunt/permissions.json):\n'));
+  for (const [tool, action] of Object.entries(permissions.tools)) {
+    const label = action === 'deny' ? chalk.red(action) : action === 'ask' ? chalk.yellow(action) : chalk.green(action);
+    console.log(`  ${chalk.cyan(tool)}: ${label}`);
+  }
+  console.log();
+}
+
+// ── /mcp ──────────────────────────────────────────────────────────────────────
+// /mcp list                            — list configured servers and their status
+// /mcp add <name> stdio <command>      — add a stdio server
+// /mcp add <name> sse <url>            — add an SSE server
+// /mcp add <name> streamable-http <url> — add a Streamable HTTP server
+// /mcp remove <name>                   — remove a server
+// /mcp search <keyword>                — search the official MCP registry
+
+async function handleMcp(rest: string[]): Promise<void> {
+  const sub = rest[0]?.toLowerCase();
+
+  if (!sub || sub === 'list') {
+    const config = await loadMcpConfig();
+    const manager = getMcpManager();
+    const states = manager.listStates();
+
+    if (config.servers.length === 0) {
+      console.log(chalk.gray('\nNo MCP servers configured.'));
+      console.log(chalk.gray('Add one with: /mcp add <name> stdio <command>'));
+      console.log(chalk.gray('         or: /mcp add <name> sse <url>\n'));
+      return;
+    }
+
+    console.log(`\n${chalk.bold('MCP Servers')}\n`);
+    for (const server of config.servers) {
+      const state = states.find(s => s.config.name === server.name);
+      const statusIcon = state?.status === 'connected' ? chalk.green('●') : chalk.gray('○');
+      const tools = state?.toolNames.length ?? 0;
+      const detail = server.transport === 'stdio' ? server.command ?? '' : server.url ?? '';
+      console.log(`  ${statusIcon} ${chalk.cyan(server.name)} ${chalk.gray(`[${server.transport}]`)} ${chalk.gray(detail)}`);
+      if (tools > 0) console.log(`    ${chalk.gray(`${tools} tool${tools > 1 ? 's' : ''}`)}`);
+    }
+    console.log('');
+    return;
+  }
+
+  if (sub === 'add') {
+    const name = rest[1];
+    const transport = rest[2]?.toLowerCase() as 'stdio' | 'sse' | 'streamable-http' | undefined;
+    const target = rest.slice(3).join(' ');
+
+    if (!name || !transport || !target) {
+      console.log(chalk.yellow('Usage: /mcp add <name> stdio <command>'));
+      console.log(chalk.yellow('       /mcp add <name> sse <url>'));
+      console.log(chalk.yellow('       /mcp add <name> streamable-http <url>'));
+      return;
+    }
+
+    if (transport !== 'stdio' && transport !== 'sse' && transport !== 'streamable-http') {
+      console.log(chalk.yellow('Transport must be "stdio", "sse", or "streamable-http"'));
+      return;
+    }
+
+    const serverConfig: McpServerConfig = transport === 'stdio'
+      ? { name, transport: 'stdio', command: target.split(' ')[0], args: target.split(' ').slice(1) }
+      : { name, transport, url: target };
+
+    await addMcpServer(serverConfig);
+
+    // Connect immediately
+    const manager = getMcpManager();
+    try {
+      const tools = await manager.connect(serverConfig);
+      const registry = getToolRegistry();
+      for (const tool of tools) registry.register(tool, 'mcp');
+      console.log(chalk.green(`✓ MCP server "${name}" added and connected (${tools.length} tools)`));
+    } catch (err) {
+      console.log(chalk.yellow(`✓ MCP server "${name}" saved (connection failed: ${err instanceof Error ? err.message : String(err)})`));
+      console.log(chalk.gray('  The server will be connected on next startup.'));
+    }
+    return;
+  }
+
+  if (sub === 'remove') {
+    const name = rest[1];
+    if (!name) { console.log(chalk.yellow('Usage: /mcp remove <name>')); return; }
+
+    const manager = getMcpManager();
+    manager.disconnect(name);
+
+    const removed = await removeMcpServer(name);
+    if (removed) {
+      console.log(chalk.green(`✓ MCP server "${name}" removed`));
+    } else {
+      console.log(chalk.yellow(`Server "${name}" not found`));
+    }
+    return;
+  }
+
+  if (sub === 'search') {
+    const keyword = rest.slice(1).join(' ').trim();
+    if (!keyword) { console.log(chalk.yellow('Usage: /mcp search <keyword>')); return; }
+
+    console.log(chalk.gray(`\nSearching MCP registry for "${keyword}"...`));
+    const results = await searchMcpRegistry(keyword);
+
+    if (results.length === 0) {
+      console.log(chalk.gray('No servers found (or the registry is unreachable).\n'));
+      return;
+    }
+
+    console.log(`\n${chalk.bold('MCP Registry Results')}\n`);
+    for (const r of results) {
+      console.log(`  ${chalk.cyan(r.name)}`);
+      if (r.description) console.log(`    ${chalk.gray(r.description)}`);
+
+      if (r.install.kind === 'stdio') {
+        const cmd = `${r.install.command} ${r.install.args.join(' ')}`.trim();
+        console.log(`    ${chalk.gray('→')} /mcp add <name> stdio ${cmd}`);
+      } else if (r.install.kind === 'remote') {
+        console.log(`    ${chalk.gray('→')} /mcp add <name> ${r.install.transport} ${r.install.url}`);
+      } else {
+        console.log(`    ${chalk.gray('(no supported install method found)')}`);
+      }
+      console.log('');
+    }
+    return;
+  }
+
+  console.log(chalk.yellow(`Unknown /mcp subcommand: ${sub}`));
+  console.log(chalk.gray('Available: list, add, remove, search'));
+}
+
+// ── /index ────────────────────────────────────────────────────────────────────
+
+async function handleIndex(cwd: string, args: string): Promise<void> {
+  const semantic = args.includes('--semantic') || args.includes('-s');
+  const existing = await loadIndex(cwd);
+  if (existing) {
+    const age = Math.round((Date.now() - new Date(existing.builtAt).getTime()) / 60000);
+    const semLabel = existing.semantic ? ' [semantic]' : '';
+    console.log(chalk.gray(`\n  Existing index: ${existing.symbols.length} symbols, ${existing.files.length} files${semLabel}, built ${age}m ago`));
+  }
+
+  const spinnerChars = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+  let spinnerIdx = 0;
+  let spinnerMsg = semantic ? 'Building index with semantic vectors…' : 'Building index…';
+  const spinnerInterval = setInterval(() => {
+    process.stdout.write(`\r${chalk.gray(`${spinnerChars[spinnerIdx]} ${spinnerMsg}`)}`);
+    spinnerIdx = (spinnerIdx + 1) % spinnerChars.length;
+  }, 80);
+
+  try {
+    await buildIndex(cwd, { semantic, onProgress: msg => { spinnerMsg = msg; } });
+    clearInterval(spinnerInterval);
+    process.stdout.write('\r' + ' '.repeat(60) + '\r');
+    const idx = await loadIndex(cwd);
+    const semInfo = idx?.semantic ? ' [semantic vectors]' : '';
+    console.log(chalk.green(`✓ Code index built${semInfo}`) + chalk.gray(` — ${idx?.symbols.length ?? 0} symbols, ${idx?.files.length ?? 0} files\n`));
+  } catch (err) {
+    clearInterval(spinnerInterval);
+    process.stdout.write('\r' + ' '.repeat(60) + '\r');
+    console.log(chalk.red(`Index build failed: ${err instanceof Error ? err.message : String(err)}\n`));
+  }
+}
 
 async function reviewContext(
   context: ContextManager,

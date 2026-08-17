@@ -16,6 +16,7 @@ import type { IntentResult } from '../pipeline/types.js';
 import type { Skill } from '../../cli/skills.js';
 import { getLogger } from '../observability/logger.js';
 import { getDefaultMetrics } from '../observability/metrics.js';
+import { hasSink } from '../../cli/ink/output-channel.js';
 
 const log = getLogger('intentor');
 
@@ -203,7 +204,7 @@ function parseIntentResult(raw: string, fallback: boolean, skills: Skill[]): Int
       if (parsed.matchedSkill) {
         const skill = skills.find((s) => s.name.toLowerCase() === parsed.matchedSkill!.toLowerCase());
         if (skill) {
-          matchedSkill = { name: skill.name, content: skill.content, system: skill.system };
+          matchedSkill = { name: skill.name, content: skill.content, system: skill.system, mode: skill.mode };
         }
       }
 
@@ -227,7 +228,14 @@ function parseIntentResult(raw: string, fallback: boolean, skills: Skill[]): Int
 
 // ── Spinner helpers ──────────────────────────────────────────────────────
 
-function startSpinner(text: string): ReturnType<typeof setInterval> {
+// \r-based cursor-position spinner — safe only when nothing else owns the
+// terminal's live region. Once a persistent App is mounted (hasSink() true),
+// Ink owns that region; a second thing moving the cursor on its own would
+// tear the frame. Skip the visual entirely in that mode — classification is
+// a single fast heuristic check or one cheap LLM call, not a long enough
+// wait to need a spinner.
+function startSpinner(text: string): ReturnType<typeof setInterval> | null {
+  if (hasSink()) return null;
   const frames = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
   let idx = 0;
   const interval = setInterval(() => {
@@ -237,9 +245,19 @@ function startSpinner(text: string): ReturnType<typeof setInterval> {
   return interval;
 }
 
-function stopSpinner(interval: ReturnType<typeof setInterval>): void {
+function stopSpinner(interval: ReturnType<typeof setInterval> | null): void {
+  if (!interval) return;
   clearInterval(interval);
   process.stdout.write('\r' + ' '.repeat(40) + '\r');
+}
+
+// ── Light model selection ────────────────────────────────────────────────
+// Classification and planning are structured tasks that don't need the full
+// reasoning power of pro/reasoner models. Use the cheapest available model.
+// For DeepSeek providers: flash. For others: fall back to whatever is configured.
+function selectLightModel(configuredModel: string): string {
+  if (configuredModel.startsWith('deepseek-')) return 'deepseek-v4-flash';
+  return configuredModel;
 }
 
 // ── Main export ──────────────────────────────────────────────────────────
@@ -271,7 +289,7 @@ export async function detectIntent(
       confidence: 85,
       reason: `matched skill: ${skillMatch.name}`,
       
-      matchedSkill: { name: skillMatch.name, content: skillMatch.content, system: skillMatch.system },
+      matchedSkill: { name: skillMatch.name, content: skillMatch.content, system: skillMatch.system, mode: skillMatch.mode },
     };
   }
 
@@ -297,7 +315,7 @@ export async function detectIntent(
   try {
     let fullText = '';
     const stream = provider.stream(messages, {
-      model,
+      model: selectLightModel(model),
       maxTokens: 256,
       temperature: 0.0,
       signal,
@@ -326,7 +344,72 @@ export async function detectIntent(
       isCoding: true,
       confidence: 50,
       reason: 'classification failed — defaulting to coding path',
-      
+
     };
   }
+}
+
+// ── Model auto-routing ───────────────────────────────────────────────────────
+//
+// Select an appropriate model tier for the task without overriding user intent.
+// Only kicks in when the configured model is a DeepSeek V4 variant (flash/pro).
+// Leaves reasoner models and non-DeepSeek providers completely untouched.
+//
+// Tier logic:
+//   flash  — simple queries, short tasks, chat, Q&A
+//   pro    — multi-step coding, bug fixes, refactors, multi-file changes
+//   (no routing to reasoner — user must opt in explicitly via /model)
+
+const COMPLEX_CODING_SIGNALS = [
+  /\b(架构|设计|重构|refactor|architect|design|complex|complicated)\b/i,
+  /\b(multiple|multi|several|many)\s+(files?|components?|modules?|classes?)\b/i,
+  /\b(security|auth|authentication|authorization|oauth|jwt|sql injection|xss)\b/i,
+  /\b(migration|migrate|upgrade|breaking change)\b/i,
+  /\b(debug|investigate|trace|profile|performance)\b/i,
+  /\b(add.{0,30}feature|implement.{0,30}system|build.{0,30}(api|service|pipeline))\b/i,
+];
+
+const SIMPLE_TASK_SIGNALS = [
+  /^(what|how|why|explain|describe|tell|list|show)\b/i,
+  /^(是什么|怎么|为什么|解释|列出|显示)/,
+  /\b(quick|simple|small|tiny|minor|typo|rename|format)\b/i,
+  /^(继续|continue|go on|next|下一步)[\s!！。.]*$/i,
+];
+
+/**
+ * Suggest a model ID for the task, given the user's currently configured model.
+ * Returns the same model if no routing applies (non-DeepSeek, reasoner, etc.).
+ */
+export function selectModelForTask(
+  configuredModel: string,
+  task: string,
+  intent: IntentResult,
+): string {
+  // Only route within the V4 flash/pro tier — leave everything else alone
+  if (!configuredModel.startsWith('deepseek-v4-')) {
+    return configuredModel;
+  }
+
+  const text = task.trim();
+
+  // Non-coding or skill tasks → flash is sufficient
+  if (!intent.isCoding || intent.matchedSkill) {
+    return 'deepseek-v4-flash';
+  }
+
+  // Simple task signals → flash
+  for (const pattern of SIMPLE_TASK_SIGNALS) {
+    if (pattern.test(text)) return 'deepseek-v4-flash';
+  }
+
+  // Short task (≤60 chars) with no complex signals → flash
+  if (text.length <= 60) return 'deepseek-v4-flash';
+
+  // Complex coding signals → pro
+  for (const pattern of COMPLEX_CODING_SIGNALS) {
+    if (pattern.test(text)) return 'deepseek-v4-pro';
+  }
+
+  // Default for medium coding tasks: keep the user's configured model
+  return configuredModel;
 }

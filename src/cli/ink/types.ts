@@ -22,6 +22,16 @@ export interface PromptInputProps {
   activeSkill?: string;
   showMeta: boolean;
   onSubmit: (result: InputResult) => void;
+  /** True while an agent turn is running. The input stays mounted (visually
+   *  dimmed) instead of unmounting — see the output-channel.ts module doc
+   *  for why that used to be impossible. Typed text and cursor position are
+   *  preserved; submission is blocked; Esc still fires (via onCancelBusy)
+   *  so the user can interrupt without losing whatever they'd started typing
+   *  for their NEXT message. */
+  busy?: boolean;
+  /** Called when Esc is pressed while busy — the parent owns interrupting
+   *  the actual agent run; this component only reports the keypress. */
+  onCancelBusy?: () => void;
 }
 
 export interface DropdownProps {

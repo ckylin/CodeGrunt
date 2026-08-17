@@ -82,6 +82,8 @@ export interface RequestOptions {
   frequencyPenalty?: number;
   /** Penalize new tokens based on presence so far (DeepSeek: -2.0 to 2.0) */
   presencePenalty?: number;
+  /** DeepSeek V4 thinking mode toggle — V4 models think by default; set 'disabled' for fast, non-reasoning responses */
+  thinking?: 'enabled' | 'disabled';
   tools?: ToolDefinition[];
   signal?: AbortSignal;
 }
@@ -108,6 +110,49 @@ export interface CodeGruntConfig {
   frequencyPenalty?: number;
   /** Penalize new tokens based on presence */
   presencePenalty?: number;
+  /**
+   * Trust mode controls how destructive tool calls are handled:
+   * - plan: read-only — execute_shell and all write tools are blocked
+   * - code: require confirmation for each destructive operation (default)
+   * - auto: auto-approve all operations (session-wide yes-for-all)
+   */
+  trustMode?: 'plan' | 'code' | 'auto';
+  /** Web search engine: 'mojeek' (default) | 'searxng' | 'duckduckgo' */
+  searchEngine?: 'mojeek' | 'searxng' | 'duckduckgo';
+  /** SearXNG instance URL — used when searchEngine is 'searxng' */
+  searxngUrl?: string;
+  /**
+   * When true (default), high-complexity coding tasks force `thinking: 'enabled'`
+   * on the routed model regardless of its default. Low-complexity tasks always
+   * force `thinking: 'disabled'` to save output tokens, independent of this flag.
+   * Thinking mode does not change per-token price — it only affects how many
+   * output tokens a response generates — so this defaults to on.
+   */
+  autoThinkingMode?: boolean;
+  /**
+   * When true (default), the agent loop automatically summarizes and replaces
+   * conversation history via compactMessages() as soon as ContextManager flags
+   * `needsCompact` (70% token budget or 40+ messages) — no user action needed.
+   * When false, the loop only prints a one-line warning and leaves the context
+   * untouched; the user must run `/compact` manually to actually free up space.
+   * Set to false if you want full control over when a summarization LLM call
+   * happens (it costs tokens and is irreversible — the original messages are
+   * discarded once compacted).
+   */
+  autoCompact?: boolean;
+  /**
+   * When true, an uncaught agent-loop error writes a local JSON crash report
+   * to ~/.codegrunt/crash-reports/ (task text, error message/stack, model,
+   * platform — no message history, no file contents). Nothing is uploaded
+   * anywhere; this is purely a local artifact you can attach to a bug report
+   * yourself. Off by default — most errors are already visible in the
+   * terminal and don't need a persisted file.
+   */
+  crashReportOnError?: boolean;
+  /** TUI color theme: 'dark' (default) or 'light'. Adjusts the accent color
+   *  and muted/dim text mapping; semantic colors (error=red, success=green)
+   *  are unaffected. */
+  theme?: 'dark' | 'light';
 }
 
 // ── Habit tracking ──────────────────────────────────────────────────────────
@@ -141,10 +186,13 @@ export interface AgentRunOptions {
   memorySummary?: string;
   /** Formatted user habit preferences — injected into system prompt above session summary. */
   userPreferences?: string;
+  /** System language, detected once at REPL startup. Defaults to 'en' if omitted. */
+  language?: 'zh' | 'en';
   onText?: (text: string) => void;
   onToolCall?: (name: string, args: Record<string, unknown>) => void;
   onToolResult?: (name: string, result: ToolResult) => void;
   /** Called at the end of each agent turn with observable behavior signals for habit tracking. */
   onTurnComplete?: (signal: TurnSignal) => void;
   signal?: AbortSignal;
+  thinking?: "enabled" | "disabled";
 }

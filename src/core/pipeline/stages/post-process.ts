@@ -1,14 +1,14 @@
-// ── Stage 4: Post Process ───────────────────────────────────────────────────
+// ── Stage 4: Post Process (v0.6: +R1 Thought Harvesting) ──────────────────
 // Handles the finalization of a turn:
 // - Pushes final assistant text message to context if stop/length
 // - Detects truncation warnings (finishReason === 'length')
 // - Determines whether to continue looping or stop
-//
-// Ref: Original post-processing logic from src/core/agent/loop.ts
-// (finishReason handling, assistant text push, truncation warning)
+// - v0.6: Scans reasoning_content for escaped tool calls (R1 Harvesting)
 
 import type { Stage, StageResult, PipelineContext } from '../types.js';
+import type { ToolCall } from '../../../types.js';
 import { getLogger } from '../../observability/logger.js';
+import { harvestToolCalls, deduplicateHarvested, filterNonEscaped } from '../../agent/r1-harvester.js';
 
 const log = getLogger('stage:post-process');
 
@@ -16,6 +16,41 @@ export class PostProcessStage implements Stage {
   readonly name = 'post-process';
 
   async execute(ctx: PipelineContext): Promise<StageResult> {
+    // ── R1 Thought Harvesting (v0.6) ──────────────────────────────────
+    // Before determining the effective finish reason, scan the reasoning
+    // content for tool calls that the model thought about but didn't emit
+    // as formal tool_calls.
+    if (ctx.reasoningText && ctx.toolCalls.length === 0 && ctx.assistantText.trim().length === 0) {
+      const harvested = deduplicateHarvested(harvestToolCalls(ctx.reasoningText));
+      if (harvested.length > 0) {
+        const nonEscaped = filterNonEscaped(harvested, ctx.toolCalls.map(tc => ({
+          name: tc.function.name,
+          args: tc.function.arguments,
+        })));
+
+        if (nonEscaped.length > 0) {
+          log.info('R1 Thought Harvesting: found escaped tool calls in reasoning', {
+            count: nonEscaped.length,
+            names: nonEscaped.map(h => h.name).join(', '),
+          });
+
+          // Convert harvested calls to formal ToolCall objects
+          const harvestedToolCalls: ToolCall[] = nonEscaped.map((h, i) => ({
+            id: `harvested_${Date.now()}_${i}`,
+            type: 'function' as const,
+            function: {
+              name: h.name,
+              arguments: JSON.stringify(h.args),
+            },
+          }));
+
+          // Only use harvested calls if no formal tool calls were emitted
+          ctx.toolCalls = harvestedToolCalls;
+          ctx.finishReason = 'tool_calls';
+        }
+      }
+    }
+
     // Guard: if no finish chunk arrived but we have text and no tool calls,
     // treat as 'stop' — some providers omit the finish event on short responses.
     const effectiveReason = ctx.finishReason
@@ -26,10 +61,6 @@ export class PostProcessStage implements Stage {
     }
 
     // ── Helper: push assistant text message (text-only turns) ────────────
-    // Note: when finishReason === 'tool_calls', ProcessToolCallsStage is
-    // responsible for pushing the assistant(tool_calls) message. This helper
-    // must NOT push it here — doing so creates a duplicate that causes the
-    // DeepSeek API to return 400 "insufficient tool messages".
     const pushAssistantMessage = () => {
       if (!ctx.assistantText) return;
       ctx.messages.push({
@@ -56,9 +87,8 @@ export class PostProcessStage implements Stage {
       return { continue: false, done: true };
     }
 
-    // ── Tool calls — more work needed; save text + tool_calls ────────────
+    // ── Tool calls — ProcessToolCallsStage handles the assistant message ──
     if (effectiveReason === 'tool_calls') {
-      pushAssistantMessage();
       log.debug('Turn continues — tool calls pending', {
         count: ctx.toolCalls.length,
         hasText: ctx.assistantText.length > 0,

@@ -16,7 +16,9 @@ export function Dropdown({ items, selectedIndex, visible }: DropdownProps): Reac
       {visible_items.map((item, i) => {
         const isSelected = i === selectedIndex;
         const indicator = isSelected ? '❯ ' : '  ';
-        const labelColor = item.kind === 'skill' ? 'white' : ACCENT;
+        // Distinct color per kind so slash commands / skills / file paths
+        // read as different categories at a glance, not one undifferentiated list.
+        const labelColor = item.kind === 'skill' ? 'white' : item.kind === 'file' ? 'green' : ACCENT;
 
         return (
           <Box key={item.value}>

@@ -27,18 +27,25 @@ codegrunt "refactor the auth module to use async/await"
 
 ## Features
 
-- **🤖 P/G/E Agentic Coding** — Intentor → Planner → Generator → Evaluator four-phase architecture: intent classification (with auto skill matching) → task decomposition → pipeline execution (multi-turn tool calls per step) → quality evaluation with auto-refine (max 3 retries)
-- **📂 Codebase-aware** — understands your project structure, imports, and conventions via `@` file references and project guide files (`CODEGRUNT.md` / `CLAUDE.md`)
-- **🔌 DeepSeek powered** — ships with DeepSeek Chat, V4 Flash, V4 Pro, and R1 reasoner models
-- **🛠️ Tool use** — 6 built-in tools (plugin-style registry with runtime add/remove): file read/write/edit, shell execution, directory listing, and code search — with diff preview and user confirmation for destructive operations
+- **🤖 P/G/E Agentic Coding** — Intentor → Planner → Generator → Evaluator four-phase architecture: intent classification (with auto skill matching + continuation detection) → task decomposition → pipeline execution (multi-turn tool calls per step) → quality evaluation with auto-refine (max 3 retries)
+- **🧠 Sub-agent System** — `agent_open` tool delegates focused research tasks to a read-only sub-agent, preventing main context bloat from intermediate tool results
+- **📂 Codebase-aware** — understands your project structure via `@` file references, project guide files (`CODEGRUNT.md` / `CLAUDE.md`), and a code symbol index (`/index`)
+- **🔌 DeepSeek powered** — ships with DeepSeek Chat, V4 Flash, V4 Pro, and R1 reasoner models, with automatic model routing based on task complexity
+- **🛠️ Tool use** — 11 built-in tools (plugin-style registry with runtime add/remove): file read/write/edit, shell execution, directory listing, code search, web search, persistent memory read/write, and sub-agent delegation — with diff preview and user confirmation for destructive operations
+- **🌐 Web Search** — supports Mojeek (default, no API key required), SearXNG (self-hosted), and DuckDuckGo search engines
 - **⚡ Streaming output** — real-time token streaming with Markdown rendering and reasoning visibility for a responsive terminal experience
 - **📎 @-references** — inject file contents, directory listings, or web page content directly into your prompt with `@file.ts`, `@src/`, or `@https://example.com`
-- **🎯 Slash commands** — `/init` to auto-generate project guide, `/model` to switch models, `/compact` to compress conversation history, `/review` to review changes, `/skills` to manage skills, and more
-- **🔒 Safe by default** — destructive operations (write/edit/shell) show a diff preview and require user confirmation before applying, with "Yes for all" session mode
-- **🔧 Skills system** — install and run reusable prompt templates as slash commands, with auto-discovery via Intentor keyword matching
+- **🎯 Slash commands** — `/init` to auto-generate project guide, `/index` to build code symbol index, `/model` to switch models, `/compact` to compress conversation history, `/review` to review changes, `/skills` to manage skills, and more
+- **🔒 Safe by default** — destructive operations (write/edit/shell) show a diff preview and require user confirmation before applying, with "Yes for all" session mode and workspace-level permission overrides
+- **🔧 Skills system** — install and run reusable prompt templates as slash commands, with auto-discovery via Intentor keyword matching; supports subagent mode (read-only execution)
+- **🧠 Habit Learning** — automatically analyzes your language preference, verbosity preference, and tool confirmation behavior, persisting learned habits to memory for optimized future interactions
+- **📸 Auto-snapshots** — side-git snapshots created after every coding turn, restorable via `/restore`
 - **💲 Cost tracking** — real-time session token usage and cost display with `/cost` and `/balance` commands
 - **🎨 Modern Terminal UI** — Ink/React-based input components with arrow-key navigation, persistent history, and autocomplete dropdown
 - **📋 Structured Logging** — Logger v2 with JSONL file logs (`~/.codegrunt/logs/`), trace IDs for cross-session correlation, and automatic log rotation (5 files × 5 MB)
+- **🔌 Hook System** — custom user-defined hook scripts (Shell/JS) triggered at prompt submit, pre/post tool use, and stop events
+- **🔍 Language Diagnostics** — auto-runs TypeScript/Python/Go/Rust/ESLint diagnostics after file edits
+- **🖥️ MCP Integration** — Model Context Protocol server connections for extending tool capabilities
 
 ---
 
@@ -101,9 +108,9 @@ codegrunt
 Starts an interactive session with:
 
 - ASCII art banner showing the model in use
-- `>` prompt for entering tasks
+- `>` prompt for entering tasks (with session usage display)
 - Tab completion for file paths (`@`) and slash commands (`/`)
-- Multi-line input support
+- Multi-line input support (parenthesis detection)
 - Arrow-key history navigation
 - Ink/React-powered modern terminal input interface
 
@@ -123,14 +130,17 @@ Executes a single task and exits. Useful for scripting and quick queries.
 | `/model` | Switch model interactively (arrow-key selector) |
 | `/model <id>` | Switch to a specific model (e.g., `/model deepseek-v4-pro`) |
 | `/init` | Analyze the codebase and generate a `CODEGRUNT.md` project guide |
+| `/index` | Build code symbol index for faster `code_search` tool |
 | `/clear` | Clear conversation context |
-| `/compact` | Summarize and compress conversation history to save tokens |
+| `/compact` | Summarize and compress conversation history to save tokens (hierarchical chunk-based compaction) |
 | `/review` | Review session changes for logic issues |
-| `/cost` | Show session token usage and estimated cost |
+| `/cost` | Show session token usage and estimated cost (with cache hit/miss stats) |
 | `/balance` | Show account balance and usage (today / this month) |
 | `/config` | Show or change configuration settings |
 | `/reasoning` / `/effort` | Set reasoning effort for R1 models (low/medium/high) |
-| `/skills` | List and manage skills (create, list) |
+| `/skills` | List and manage skills (create, list, install) |
+| `/search-engine` | Switch the web search engine |
+| `/restore` | Restore workspace from an auto-snapshot |
 
 ### @-References
 
@@ -142,7 +152,7 @@ Reference files, directories, or URLs directly in your prompt:
 | `@<directory>` | Inject directory listing (up to 20 entries) | `@src/components/` |
 | `@<url>` | Fetch and inject webpage content | `@https://example.com` |
 
-Tab completion is supported for file and directory paths.
+Tab completion is supported for file and directory paths. Directory scanning skips `node_modules`, `.git`, `dist`, `.next`, `__pycache__`, `.cache`.
 
 ---
 
@@ -167,6 +177,8 @@ CodeGrunt is configured via environment variables or a `~/.codegrunt/config.json
 | `CODEGRUNT_LOG_LEVEL` | Log level: `debug` \| `info` \| `warn` \| `error` | `info` |
 | `CODEGRUNT_LOG_FILE` | Set to `0` or `false` to disable file logging | enabled |
 | `CODEGRUNT_VERBOSE` | Enable verbose stderr output | disabled |
+| `CODEGRUNT_SEARCH_ENGINE` | Web search engine: `mojeek` \| `searxng` \| `duckduckgo` | `mojeek` |
+| `CODEGRUNT_SEARXNG_URL` | Self-hosted SearXNG instance URL (when engine is searxng) | — |
 
 ### Config file (`~/.codegrunt/config.json`)
 
@@ -195,178 +207,7 @@ The config file is auto-generated on first run via the setup wizard. Environment
 
 ---
 
-## Architecture
-
-```
-codegrunt/
-├── src/
-│   ├── cli/                      # CLI entry point, REPL, argument parsing
-│   │   ├── index.ts              # Entry point (commander-based CLI)
-│   │   ├── repl.ts               # Interactive REPL loop
-│   │   ├── input.ts              # Multiline input, tab completion, list selector
-│   │   ├── ink/                  # Ink/React terminal UI components
-│   │   │   ├── PromptInput.tsx   # Main input (cursor, history, autocomplete)
-│   │   │   ├── Dropdown.tsx      # Autocomplete dropdown overlay
-│   │   │   ├── ListPicker.tsx    # Arrow-key list selector
-│   │   │   ├── useAutocomplete.ts # File/command/skill completion
-│   │   │   ├── useHistory.ts     # Persistent command history
-│   │   │   └── types.ts          # Ink component types
-│   │   ├── commands.ts           # Slash commands (/help, /model, /init, etc.)
-│   │   ├── setup.ts              # First-run setup wizard
-│   │   ├── skills.ts             # Skill loading and management
-│   │   ├── update.ts             # Version check and upgrade
-│   │   ├── banner.ts             # ASCII art banner
-│   │   └── at-resolver.ts        # @file/@url reference expansion
-│   ├── core/
-│   │   ├── agent/
-│   │   │   ├── loop.ts           # Agent loop — P/G/E orchestration entry
-│   │   │   ├── intentor.ts       # Intent classifier (coding/chat/skill matching)
-│   │   │   ├── planner.ts        # Task planner (multi-step decomposition)
-│   │   │   └── evaluator.ts      # Quality evaluator (output check + auto-refine)
-│   │   ├── pipeline/             # Harness-style pipeline engine
-│   │   │   ├── engine.ts         # PipelineEngine: stage executor
-│   │   │   ├── types.ts          # Pipeline context, stage interfaces, P/G/E types
-│   │   │   └── stages/
-│   │   │       ├── prepare-context.ts   # Build system prompt + inject project guide
-│   │   │       ├── stream-response.ts   # Stream LLM call + token accumulation
-│   │   │       ├── process-tools.ts     # Parse tool calls + execute + inject results
-│   │   │       ├── process-tools-helpers.ts  # yes-for-all session state
-│   │   │       └── post-process.ts      # Post-process: blind-write warnings, token stats
-│   │   ├── tools/
-│   │   │   ├── registry.ts       # Plugin-style ToolRegistry (runtime register/remove)
-│   │   │   ├── executor.ts       # Tool execution (diff confirm, param validation)
-│   │   │   ├── read_file.ts
-│   │   │   ├── write_file.ts
-│   │   │   ├── edit_file.ts
-│   │   │   ├── execute_shell.ts
-│   │   │   ├── list_directory.ts
-│   │   │   └── search_files.ts
-│   │   ├── context/
-│   │   │   ├── manager.ts        # Context window management (token budget, trimming)
-│   │   │   └── project-guide.ts  # Load CODEGRUNT.md / CLAUDE.md project guides
-│   │   ├── events/
-│   │   │   └── bus.ts            # Typed EventBus (pipeline/tool/LLM lifecycle events)
-│   │   ├── observability/
-│   │   │   ├── logger.ts         # Logger v2: file transport + trace IDs + rotation
-│   │   │   └── metrics.ts        # Lightweight Metrics (counters, timers, snapshots)
-│   │   └── di/
-│   │       └── container.ts      # Service container/DI (singleton, transient lifecycles)
-│   ├── providers/
-│   │   └── deepseek/
-│   │       ├── provider.ts       # DeepSeek LLM provider implementation
-│   │       └── client.ts         # OpenAI-compatible client factory + API key validation
-│   ├── utils/
-│   │   ├── display.ts            # Terminal output formatting (plan, step, evaluation)
-│   │   ├── confirm.ts            # Diff preview and user confirmation
-│   │   ├── billing.ts            # Balance/usage querying and cost display
-│   │   ├── markdown.ts           # Streaming Markdown-to-terminal renderer
-│   │   ├── interrupt.ts          # SIGINT handling
-│   │   ├── select.ts             # Interactive list selector (arrow-key navigation)
-│   │   └── constants.ts          # Shared constants
-│   ├── config.ts                 # Configuration loading (env vars, config file)
-│   └── types.ts                  # Shared TypeScript types and interfaces
-├── tests/
-│   ├── tools/
-│   │   ├── read_file.test.ts
-│   │   ├── write_file.test.ts
-│   │   └── execute_shell.test.ts
-├── docs/                         # Documentation
-├── package.json
-├── tsconfig.json
-├── vitest.config.ts
-├── CODEGRUNT.md                   # Project guide for CodeGrunt
-├── CLAUDE.md                     # Project guide for AI coding assistants
-└── README.md                     # This file (Chinese)
-```
-
-### High-level flow
-
-```
-User Input (CLI / REPL)
-       │
-       ▼
-  ┌──────────────┐
-  │   Intentor   │  Intent: Skill match / Coding → P/G/E / Chat → direct gen
-  └──────┬───────┘
-         │
-    ┌────▼─────────────────────────────────────┐
-    │  Planner → Generator → Evaluator          │
-    │   Plan       Execute     Evaluate          │
-    │     (auto-refine on eval failure, max 3x)  │
-    └──────────────────────────────────────────┘
-         │
-    ┌────▼──────────┐
-    │  Pipeline      │  5 stages: prepare→stream→tools→post-process
-    │  Engine        │
-    └───────────────┘
-         │
-    ┌────▼────┐
-    │  Tools  │  6 built-in + plugin registry
-    │ (6+)    │
-    └─────────┘
-```
-
-### Agent Loop (`src/core/agent/loop.ts`)
-
-The agent loop uses a **P/G/E (Planner / Generator / Evaluator) + Intentor** architecture:
-
-**Phase 0 — Intentor**: Classifies tasks into three paths — Skill match, Coding, or Chat. Uses fast heuristics first (keyword patterns, continuation detection, skill keyword overlap ≥40%); falls back to LLM only when ambiguous.
-
-**Coding Flow — P/G/E Pipeline**:
-1. **Planner**: Decomposes complex tasks into 2-5 independently verifiable steps. Skipped for short tasks (≤50 chars) and continuation signals
-2. **Generator**: Pipeline engine executes each step — with **inner iteration** (multi-turn tool call loops per step)
-3. **Evaluator**: Quality check / plan adherence / hallucination detection. Fails → injects feedback and retries (max 3). `pruneRefineMessages` cleans eval feedback between steps
-4. `sessionHasRead` tracking prevents redundant file reads across turns
-
-**Skill Flow**: Applies skill system prompt + content, then chat-style generation with tool call iteration.
-
-**Chat Flow**: Skips Planner/Evaluator, uses Generator pipeline iteratively (up to 30 iterations). Prints fallback text if model returns empty.
-
-Key design decisions:
-
-- **System prompt stability**: Built once per session, never changes. Maximizes DeepSeek prompt cache hit rates.
-- **Pipeline architecture**: Inspired by Harness CI/CD, 5 independently testable stages sharing a `PipelineContext`
-- **EventBus**: All lifecycle events (pipeline start/complete, tool calls, LLM usage) published via typed EventBus
-- **DI Container**: Services registered/resolved via `ServiceContainer`, supporting singleton and transient lifecycles
-- **Streaming-first**: All LLM communication via `AsyncIterable<StreamChunk>` for real-time terminal output
-
-### Tool System
-
-Tools are how the LLM interacts with the user's environment. Each tool implements the `Tool` interface and is registered via the plugin-style `ToolRegistry` (supports runtime dynamic add/remove).
-
-| Tool | Description |
-|---|---|
-| `read_file` | Read file contents (truncated at 30,000 chars) |
-| `write_file` | Write content to a file (creates directories) |
-| `edit_file` | Replace exact string in a file |
-| `execute_shell` | Run shell commands with timeout |
-| `list_directory` | List directory tree with configurable depth |
-| `search_files` | Search for text patterns in files |
-
-**Safety**: Before destructive operations, the executor shows a diff preview and asks for user confirmation with three options: Yes, Yes for all (session), No.
-
-### Context Management (`src/core/context/manager.ts`)
-
-`ContextManager` maintains the conversation history:
-
-- **Token estimation**: Uses a simple 4:1 character-to-token ratio.
-- **Trimming**: When the estimated token count exceeds the budget, oldest non-system messages are removed.
-- **Budget**: Defaults to 90,000 tokens for chat models; 100,000 for reasoner models.
-
-### Observability
-
-- **Logger v2** (`observability/logger.ts`): Structured JSONL file logs (`~/.codegrunt/logs/`), trace IDs for cross-session correlation, log rotation (5 files × 5 MB), env var control
-- **Metrics** (`observability/metrics.ts`): Counters/timers/snapshots with telemetry summary output
-- **EventBus** (`events/bus.ts`): Typed event bus covering all lifecycle events
-
-### Provider System
-
-The DeepSeek provider implements the `LLMProvider` interface. The `StreamChunk` discriminated union supports:
-
-- `text_delta` — incremental text output
-- `reasoning_delta` — chain-of-thought reasoning (shown as "Thinking...")
-- `tool_call_delta` — streaming tool call arguments
-- `finish` — stream end with finish reason
+> 📖 For detailed architecture documentation including the directory tree, agent loop, tool system, pipeline engine, context management, and observability, see the [Development Guide](docs/development-guide-en.md).
 
 ---
 
@@ -385,20 +226,7 @@ npm start          # run compiled dist/cli/index.js
 npx vitest run tests/tools/read_file.test.ts
 ```
 
-### Project Structure
-
-- `src/cli/` — entry point, REPL loop, argument parsing, skills, updates, **Ink/React terminal UI**
-- `src/core/agent/` — Intentor (intent + skill classification), Planner (task decomposition), Generator (pipeline execution), Evaluator (quality assessment)
-- `src/core/pipeline/` — Harness-style pipeline engine (5 stages)
-- `src/core/tools/` — file read/write, shell execution, search tool implementations
-- `src/core/context/` — context window management and project guide loading
-- `src/core/events/` — typed EventBus
-- `src/core/observability/` — Logger v2 + Metrics
-- `src/core/di/` — service container/DI
-- `src/providers/` — LLM provider adapters implementing a shared `LLMProvider` interface
-- `src/utils/` — shared utilities (display, confirm, billing, markdown, interrupt, selector)
-
-For detailed development instructions, see:
+For project structure details, architecture design, agent loop documentation, and more, see:
 - [Development Guide (English)](docs/development-guide-en.md)
 - [开发者指南 (中文)](docs/development-guide.md)
 

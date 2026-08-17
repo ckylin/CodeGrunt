@@ -14,6 +14,10 @@ const DEFAULTS: CodeGruntConfig = {
   apiKey: '',
   baseURL: 'https://api.deepseek.com',
   reasoningEffort: 'medium',
+  autoThinkingMode: true,
+  autoCompact: true,
+  crashReportOnError: false,
+  theme: 'dark',
 };
 
 async function loadConfigFile(): Promise<Partial<CodeGruntConfig>> {
@@ -43,6 +47,15 @@ function envFloat(name: string, fallback: number | undefined): number | undefine
   return isNaN(n) ? fallback : n;
 }
 
+/** Parse a boolean env var ('1'/'true' → true, '0'/'false' → false), returning the fallback otherwise. */
+function envBool(name: string, fallback: boolean): boolean {
+  const raw = process.env[name];
+  if (raw === undefined) return fallback;
+  if (raw === '1' || raw.toLowerCase() === 'true') return true;
+  if (raw === '0' || raw.toLowerCase() === 'false') return false;
+  return fallback;
+}
+
 export async function loadConfig(): Promise<CodeGruntConfig> {
   const fileConfig = await loadConfigFile();
 
@@ -59,6 +72,17 @@ export async function loadConfig(): Promise<CodeGruntConfig> {
     topP: envFloat('CODEGRUNT_TOP_P', fileConfig.topP ?? DEFAULTS.topP),
     frequencyPenalty: envFloat('CODEGRUNT_FREQUENCY_PENALTY', fileConfig.frequencyPenalty ?? DEFAULTS.frequencyPenalty),
     presencePenalty: envFloat('CODEGRUNT_PRESENCE_PENALTY', fileConfig.presencePenalty ?? DEFAULTS.presencePenalty),
+    trustMode: (process.env.CODEGRUNT_TRUST_MODE as 'plan' | 'code' | 'auto')
+      ?? fileConfig.trustMode
+      ?? 'code',
+    searchEngine: (process.env.CODEGRUNT_SEARCH_ENGINE as 'mojeek' | 'searxng' | 'duckduckgo')
+      ?? fileConfig.searchEngine
+      ?? 'mojeek',
+    searxngUrl: process.env.CODEGRUNT_SEARXNG_URL ?? fileConfig.searxngUrl,
+    autoThinkingMode: envBool("CODEGRUNT_AUTO_THINKING", fileConfig.autoThinkingMode ?? true),
+    autoCompact: envBool("CODEGRUNT_AUTO_COMPACT", fileConfig.autoCompact ?? true),
+    crashReportOnError: envBool("CODEGRUNT_CRASH_REPORT", fileConfig.crashReportOnError ?? false),
+    theme: (process.env.CODEGRUNT_THEME as 'dark' | 'light') ?? fileConfig.theme ?? 'dark',
   };
 }
 
@@ -70,12 +94,20 @@ export async function saveConfig(config: CodeGruntConfig): Promise<void> {
       {
         apiKey: config.apiKey,
         model: config.model,
+        baseURL: config.baseURL,
         maxTokens: config.maxTokens,
         temperature: config.temperature,
         reasoningEffort: config.reasoningEffort,
         topP: config.topP,
         frequencyPenalty: config.frequencyPenalty,
         presencePenalty: config.presencePenalty,
+        trustMode: config.trustMode,
+        searchEngine: config.searchEngine,
+        searxngUrl: config.searxngUrl,
+        autoThinkingMode: config.autoThinkingMode,
+        autoCompact: config.autoCompact,
+        crashReportOnError: config.crashReportOnError,
+        theme: config.theme,
       },
       null,
       2,

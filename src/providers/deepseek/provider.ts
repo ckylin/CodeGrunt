@@ -3,14 +3,9 @@ import type { LLMProvider, Message, RequestOptions, StreamChunk, ToolDefinition,
 import { createOpenAIClient } from './client.js';
 import type { CodeGruntConfig } from '../../types.js';
 import chalk from 'chalk';
-import { addUsage } from '../../core/usage.js';
+import { addUsage, PRICING as CORE_PRICING, calculateCost } from '../../core/usage.js';
 import { recordUsage } from '../../utils/billing.js';
-
-interface AccumulatedToolCall {
-  id: string;
-  name: string;
-  arguments: string;
-}
+import { ApiError, RetryableError, UserAbortError } from '../../core/errors.js';
 
 const RETRYABLE_STATUS = new Set([429, 500, 502, 503, 504]);
 const RETRYABLE_CODES = new Set(['ECONNRESET', 'ETIMEDOUT']);
@@ -44,12 +39,29 @@ function getRetryAfterMs(err: unknown): number | undefined {
   return isNaN(seconds) ? undefined : Math.min(seconds * 1000, MAX_RETRY_AFTER_MS);
 }
 
-async function withRetry<T>(fn: () => Promise<T>, signal?: AbortSignal): Promise<T> {
+/** Wraps a raw OpenAI SDK error in one of our typed error classes so callers
+ *  (CLI/repl top-level catches) can distinguish "the API rejected the
+ *  request" from "the network is flaky" without re-inspecting HTTP status
+ *  codes themselves. Preserves the original error as `.cause` for logging. */
+function wrapProviderError(err: unknown, status: number | undefined): CodeGruntErrorLike {
+  const message = err instanceof Error ? err.message : String(err);
+  if (status !== undefined && NON_RETRYABLE_STATUS.has(status)) {
+    return new ApiError(message, status, { cause: err instanceof Error ? err : undefined });
+  }
+  return new RetryableError(message, { cause: err instanceof Error ? err : undefined });
+}
+
+// Local alias — both ApiError and RetryableError satisfy this shape.
+type CodeGruntErrorLike = ApiError | RetryableError;
+
+// Exported for direct unit testing of retry/error-wrapping behavior without
+// needing to mock the full OpenAI streaming client.
+export async function withRetry<T>(fn: () => Promise<T>, signal?: AbortSignal): Promise<T> {
   const maxRetries = 3;
   let lastError: unknown;
 
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
-    if (signal?.aborted) throw new Error('Aborted');
+    if (signal?.aborted) throw new UserAbortError();
 
     try {
       return await fn();
@@ -61,7 +73,7 @@ async function withRetry<T>(fn: () => Promise<T>, signal?: AbortSignal): Promise
 
       // Non-retryable HTTP errors — fail immediately
       if (status !== undefined && NON_RETRYABLE_STATUS.has(status)) {
-        throw err;
+        throw wrapProviderError(err, status);
       }
 
       // Only retry known transient errors
@@ -70,7 +82,7 @@ async function withRetry<T>(fn: () => Promise<T>, signal?: AbortSignal): Promise
         (code !== undefined && RETRYABLE_CODES.has(code));
 
       if (!isRetryable || attempt === maxRetries) {
-        throw err;
+        throw wrapProviderError(err, status);
       }
 
       // Determine wait time: retry-after header wins over backoff
@@ -88,13 +100,13 @@ async function withRetry<T>(fn: () => Promise<T>, signal?: AbortSignal): Promise
         const timer = setTimeout(resolve, waitMs);
         signal?.addEventListener('abort', () => {
           clearTimeout(timer);
-          reject(new Error('Aborted'));
+          reject(new UserAbortError());
         }, { once: true });
       });
     }
   }
 
-  throw lastError;
+  throw wrapProviderError(lastError, getStatusCode(lastError));
 }
 
 export class DeepSeekProvider implements LLMProvider {
@@ -127,14 +139,17 @@ export class DeepSeekProvider implements LLMProvider {
       ...(options.reasoningEffort !== undefined
         ? { reasoning_effort: options.reasoningEffort } as Record<string, unknown>
         : {}),
+      // V4 thinking mode toggle — V4 models think by default; explicitly disable
+      // for calls that want a fast, non-reasoning response (e.g. summarization).
+      ...(options.thinking !== undefined
+        ? { thinking: { type: options.thinking } } as Record<string, unknown>
+        : {}),
       messages: openaiMessages,
       tools: tools && tools.length > 0 ? tools : undefined,
       tool_choice: tools && tools.length > 0 ? 'auto' : undefined,
       stream: true,
       stream_options: { include_usage: true },
     }, { signal: options.signal }), options.signal);
-
-    const accumulator = new Map<number, AccumulatedToolCall>();
 
     for await (const chunk of stream) {
       const choice = chunk.choices[0];
@@ -158,14 +173,9 @@ export class DeepSeekProvider implements LLMProvider {
         yield { type: 'reasoning_delta', text: reasoning };
       }
 
+      // Stream tool_call deltas directly — accumulation is handled by StreamResponseStage.
       if (delta.tool_calls) {
         for (const tc of delta.tool_calls) {
-          const existing = accumulator.get(tc.index) ?? { id: '', name: '', arguments: '' };
-          if (tc.id) existing.id = tc.id;
-          if (tc.function?.name) existing.name = tc.function.name;
-          if (tc.function?.arguments) existing.arguments += tc.function.arguments;
-          accumulator.set(tc.index, existing);
-
           yield {
             type: 'tool_call_delta',
             index: tc.index,
@@ -227,25 +237,16 @@ function toOpenAIMessage(msg: Message, includeReasoning = false): OpenAI.Chat.Ch
   } as OpenAI.Chat.ChatCompletionMessageParam;
 }
 
-// ── DeepSeek pricing (USD per 1M tokens) ────────────────────────────────────
-const PRICING = {
-  chat:    { prompt: 0.27, completion: 1.10, cacheHit: 0.07 },
-  reasoner:{ prompt: 0.55, completion: 2.19, cacheHit: 0.14 },
-} as const;
-
-function detectModelType(model: string): 'chat' | 'reasoner' {
-  return model.includes('reasoner') || model.toLowerCase().includes('r1') ? 'reasoner' : 'chat';
-}
-
 function printUsage(usage: OpenAI.CompletionUsage, model: string): void {
   const cached = (usage as unknown as Record<string, unknown>)?.prompt_cache_hit_tokens as number | undefined;
   const miss   = (usage as unknown as Record<string, unknown>)?.prompt_cache_miss_tokens as number | undefined;
-  const modelType = detectModelType(model);
-  const p = modelType === 'reasoner' ? PRICING.reasoner : PRICING.chat;
 
   const inputTokens = usage.prompt_tokens ?? 0;
   const outputTokens = usage.completion_tokens ?? 0;
   const cacheHits = cached ?? 0;
+
+  // Look up pricing from the centralized single source of truth in core/usage.ts
+  const p = CORE_PRICING[model] ?? CORE_PRICING['deepseek-v4-flash'];
 
   if (cached !== undefined && (process.env['DEBUG'] || process.env['CODEGRUNT_VERBOSE'])) {
     const total = inputTokens;
@@ -259,19 +260,19 @@ function printUsage(usage: OpenAI.CompletionUsage, model: string): void {
     );
   }
 
-  // Session tracking (in-memory)
+  // Calculate cost from centralized function
+  const totalCost = calculateCost(p, inputTokens, outputTokens, cacheHits);
+
+  // Session tracking (in-memory) — unified UsageStats now includes cost
   addUsage({
     inputTokens,
     outputTokens,
     cacheHitTokens: cacheHits,
     cacheMissTokens: miss ?? 0,
+    cost: totalCost,
   });
 
   // Persist to local usage log (fire-and-forget — don't block the stream)
-  const inputCost = (inputTokens / 1_000_000) * p.prompt;
-  const outputCost = (outputTokens / 1_000_000) * p.completion;
-  const cacheSavings = (cacheHits / 1_000_000) * (p.prompt - p.cacheHit);
-  const totalCost = inputCost + outputCost - cacheSavings;
   recordUsage(inputTokens, outputTokens, cacheHits, totalCost).catch(() => {});
 }
 

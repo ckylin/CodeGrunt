@@ -71,6 +71,11 @@ export class StreamResponseStage implements Stage {
 
     const accumulator = new Map<number, AccumulatedToolCall>();
 
+    // Show a waiting indicator before the first chunk arrives — otherwise
+    // non-reasoner models (no reasoning_delta) leave the terminal blank for
+    // the entire API round-trip.
+    emitter.startThinking?.();
+
     try {
       const stream = ctx.provider.stream(ctx.messages, {
         model: ctx.config.model,
@@ -80,6 +85,7 @@ export class StreamResponseStage implements Stage {
         topP: ctx.config.topP,
         frequencyPenalty: ctx.config.frequencyPenalty,
         presencePenalty: ctx.config.presencePenalty,
+        thinking: ctx.thinking,
         tools: ctx.toolDefinitions,
         signal: ctx.signal,
       });
@@ -144,7 +150,7 @@ export class StreamResponseStage implements Stage {
       // (some reasoner models emit thinking without reasoning_content deltas)
 
     } catch (err) {
-      if ((err as Error)?.name === 'AbortError' || ctx.signal?.aborted) {
+      if ((err as Error)?.name === 'AbortError' || (err as Error)?.name === 'UserAbortError' || ctx.signal?.aborted) {
         log.info('LLM stream aborted');
         throw err;
       }

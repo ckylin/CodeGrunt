@@ -16,6 +16,7 @@
 - [添加新的 LLM 提供商](#添加新的-llm-提供商)
 - [添加新工具](#添加新工具)
 - [配置系统](#配置系统)
+- [钩子系统](#钩子系统)
 - [发布流程](#发布流程)
 - [常见问题排查](#常见问题排查)
 
@@ -108,7 +109,8 @@ codegrunt/
 │   │   │   ├── loop.ts       # 代理循环 — P/G/E 编排入口
 │   │   │   ├── intentor.ts   # 意图分类器（编码 vs 聊天 + Skill 匹配）
 │   │   │   ├── planner.ts    # 任务规划器（分解为多步骤计划）
-│   │   │   └── evaluator.ts  # 质量评估器（输出检查 + 自动修正）
+│   │   │   ├── evaluator.ts  # 质量评估器（输出检查 + 自动修正）
+│   │   │   └── subagent.ts   # 只读子代理执行引擎
 │   │   ├── pipeline/         # Harness 风格管道引擎
 │   │   │   ├── engine.ts     # PipelineEngine：阶段执行器
 │   │   │   ├── types.ts      # 管道上下文、阶段接口、P/G/E 类型定义
@@ -120,26 +122,48 @@ codegrunt/
 │   │   │       └── post-process.ts      # 后处理：盲写警告、Token 统计
 │   │   ├── tools/
 │   │   │   ├── registry.ts   # 插件式 ToolRegistry（运行时注册/移除）
-│   │   │   ├── executor.ts   # 工具执行（含 diff 确认、参数验证）
 │   │   │   ├── read_file.ts
 │   │   │   ├── write_file.ts
 │   │   │   ├── edit_file.ts
 │   │   │   ├── execute_shell.ts
 │   │   │   ├── list_directory.ts
-│   │   │   └── search_files.ts
+│   │   │   ├── search_files.ts
+│   │   │   ├── memory.ts     # memory_write / memory_read 工具
+│   │   │   ├── web_search.ts # Web 搜索工具
+│   │   │   ├── code_search.ts # 代码符号搜索工具
+│   │   │   └── agent_open.ts # 子代理委派工具
 │   │   ├── context/
 │   │   │   ├── manager.ts    # 上下文窗口管理（Token 预算、裁剪）
+│   │   │   ├── compact.ts    # 分层块式对话压缩
 │   │   │   └── project-guide.ts  # 加载 CODEGRUNT.md / CLAUDE.md 项目指南
+│   │   ├── memory/
+│   │   │   ├── store.ts      # 持久化记忆存储（JSONL 文件）
+│   │   │   └── habits.ts     # 用户行为习惯学习
+│   │   ├── index/
+│   │   │   └── index.ts      # 代码符号索引构建和搜索
+│   │   ├── permissions/
+│   │   │   └── index.ts      # Workspace 级别工具权限覆盖
+│   │   ├── snapshot/
+│   │   │   └── index.ts      # Side-git 自动快照
+│   │   ├── hooks/
+│   │   │   └── registry.ts   # 用户自定义钩子脚本系统
+│   │   ├── lsp/
+│   │   │   └── checker.ts    # 语言诊断（TS/Python/Go/Rust/ESLint）
+│   │   ├── mcp/
+│   │   │   ├── config.ts     # MCP 服务器配置持久化
+│   │   │   ├── manager.ts    # MCP 客户端连接管理
+│   │   │   └── types.ts      # MCP 类型定义
+│   │   ├── session/
+│   │   │   └── store.ts      # 会话状态持久化
 │   │   ├── events/
-│   │   │   └── bus.ts        # 类型化 EventBus（管道/工具/LLM 生命周期事件）
+│   │   │   └── bus.ts        # 类型化 EventBus
 │   │   ├── observability/
 │   │   │   ├── logger.ts     # Logger v2：文件传输 + Trace ID + 日志轮转
 │   │   │   └── metrics.ts    # 轻量 Metrics（计数器、计时器、快照）
-│   │   └── di/
-│   │       └── container.ts  # 服务容器/DI（单例、瞬态、生命周期管理）
+│   │   └── usage.ts          # 会话/单次调用 Token 用量追踪
 │   ├── providers/
 │   │   └── deepseek/
-│   │       ├── provider.ts   # DeepSeek LLM 提供商实现
+│   │       ├── provider.ts   # DeepSeek LLM 提供商实现（含指数退避重试）
 │   │       └── client.ts     # OpenAI 兼容客户端工厂 + API Key 验证
 │   ├── utils/
 │   │   ├── display.ts        # 终端输出格式化（计划、步骤、评估）
@@ -148,6 +172,7 @@ codegrunt/
 │   │   ├── markdown.ts       # 流式 Markdown 转终端渲染器
 │   │   ├── interrupt.ts      # SIGINT 处理
 │   │   ├── select.ts         # 交互式列表选择器（方向键导航）
+│   │   ├── locale.ts         # 系统语言检测
 │   │   └── constants.ts      # 共享常量
 │   ├── config.ts             # 配置加载（环境变量、配置文件）
 │   └── types.ts              # 共享 TypeScript 类型和接口
@@ -155,7 +180,17 @@ codegrunt/
 │   ├── tools/
 │   │   ├── read_file.test.ts
 │   │   ├── write_file.test.ts
+│   │   ├── edit_file.test.ts
 │   │   └── execute_shell.test.ts
+│   ├── agent/
+│   │   ├── intentor_planner.test.ts
+│   │   └── subagent.test.ts
+│   ├── context/
+│   │   └── context_manager.test.ts
+│   ├── pipeline/
+│   │   └── engine.test.ts
+│   └── manual/
+│       └── input-test.ts
 ├── docs/                     # 文档
 ├── dist/                     # 编译输出（gitignore）
 ├── package.json
@@ -261,9 +296,12 @@ npx vitest                        # 监视模式
 npx vitest run tests/tools/read_file.test.ts
 npx vitest run tests/tools/write_file.test.ts
 npx vitest run tests/tools/execute_shell.test.ts
+npx vitest run tests/tools/edit_file.test.ts
+npx vitest run tests/agent/intentor_planner.test.ts
+npx vitest run tests/agent/subagent.test.ts
+npx vitest run tests/context/context_manager.test.ts
+npx vitest run tests/pipeline/engine.test.ts
 ```
-
-> **注意：** 目前 6 个工具中只有 3 个有测试文件。`edit_file`、`list_directory` 和 `search_files` 的测试尚未实现。欢迎贡献添加这些测试！
 
 ### 详细输出
 
@@ -315,7 +353,7 @@ describe('read_file', () => {
        │
        ▼
   ┌──────────────┐
-  │   Intentor   │  意图分类：Skill 匹配 / 编码 → P/G/E / 聊天 → 直接生成
+  │   Intentor   │  意图分类：Skill 匹配 / 编码 / 聊天
   └──────┬───────┘
          │
     ┌────▼─────────────────────────────────────┐
@@ -330,9 +368,14 @@ describe('read_file', () => {
     └───────────────┘
          │
     ┌────▼────┐
-    │  工具    │  6 个内置工具 + 插件式注册表
-    │ (6+)    │
+    │  工具    │  11 个内置工具 + MCP 扩展
+    │ (11+)   │
     └─────────┘
+         │
+    ┌────▼──────────────┐
+    │  习惯/记忆         │  自动学习用户偏好并持久化
+    │  快照/诊断         │  安全网：自动快照 + 编辑后诊断
+    └───────────────────┘
 ```
 
 ### 代理循环（src/core/agent/loop.ts）
@@ -340,7 +383,7 @@ describe('read_file', () => {
 代理循环是 CodeGrunt 的核心，采用 **P/G/E（Planner / Generator / Evaluator）+ Intentor** 架构：
 
 **Phase 0 — Intentor（意图分类）**：将任务分为三条路径：
-- **Skill 匹配** → `runSkillFlow`：应用 Skill 系统提示 + 内容，然后按聊天方式生成
+- **Skill 匹配** → `runSkillFlow`：应用 Skill 系统提示 + 内容，支持子代理模式（只读执行）
 - **编码任务** → `runCodingFlow`：P/G/E 管道：规划 → 执行 → 评估 → 修正
 - **聊天任务** → `runChatFlow`：直接生成管道，跳过 Planner/Evaluator
 
@@ -352,39 +395,45 @@ Intentor 优先使用快速启发式规则：
 仅在启发式规则不明确时才调用 LLM，节省延迟和费用。
 
 **编码流程 — P/G/E 管道**：
-1. **Planner（规划器）**：将复杂任务分解为 2-5 个独立可验证的步骤，使用低温（0.1）结构化 JSON 输出。短任务（≤50 字符）和 continuation 信号跳过 Planner
+1. **Planner（规划器）**：将复杂任务分解为 2-5 个独立可验证的步骤，使用低温（0.1）结构化 JSON 输出。向提示中注入真实工具列表，过滤无效的 `toolsHint` 值。短任务（≤50 字符）和 continuation 信号跳过 Planner
 2. **Generator（生成器）**：管道引擎依次执行每个步骤 → 准备上下文 → 流式 LLM 调用 → 工具执行 → 后处理。现支持**步骤内多轮迭代**——单个步骤内可进行多次工具调用往返
-3. **Evaluator（评估器）**：检查输出质量 / 计划符合度 / 幻觉。不通过则注入反馈并重试（最多 3 次，由原来的 2 次提升）。`pruneRefineMessages()` 在步骤间清理评估反馈消息
+3. **Evaluator（评估器）**：检查输出质量 / 计划符合度 / 幻觉（覆盖 14 种错误模式）。不通过则注入反馈并重试（最多 3 次）。3 次失败后提示用户是否继续。`pruneRefineMessages()` 在步骤间清理评估反馈消息。编辑后自动运行 `tsc --noEmit`（TypeScript 项目）
 4. `sessionHasRead` 追踪跨步骤的文件读取，避免重复操作
 
-**聊天流程**：跳过 Planner/Evaluator，直接用 Generator 管道迭代到模型停止（最多 30 次）。模型返回空时显示回退文本「（模型未返回文本响应）」。
+**聊天流程**：跳过 Planner/Evaluator，直接用 Generator 管道迭代到模型停止（最多 30 次）。模型返回空时显示回退文本。
 
-**Skill 流程**：应用 Skill 系统提示 + 内容，然后按聊天模式进行工具调用迭代。
+**Skill 流程**：应用 Skill 系统提示 + 内容，然后按聊天模式进行工具调用迭代。支持子代理模式（`mode: 'subagent'`），在隔离的只读上下文中执行。
 
 关键设计决策：
 
-- **系统提示稳定性**：系统提示只构建一次，会话期间不更改。最大化 DeepSeek 提示缓存命中率。
+- **系统提示稳定性**：系统提示只构建一次，会话期间不更改。最大化 DeepSeek 提示缓存命中率。R1 推理模型的系统提示嵌入在首条用户消息中
 - **管道架构**：借鉴 Harness CI/CD，5 个独立可测试阶段共享 `PipelineContext`
 - **EventBus**：所有生命周期事件（管道启动/完成、工具调用、LLM 用量）通过类型化 EventBus 发布
-- **DI 容器**：服务通过 `ServiceContainer` 注册/解析，支持单例和瞬态生命周期
 - **流式优先**：所有 LLM 通信通过 `AsyncIterable<StreamChunk>` 流式传输，实时终端输出
+- **子代理**：`agent_open` 工具委派只读研究任务，限制使用非破坏性工具集
+- **模型分支**：`isReasonerModel()` 检测 R1 变体；`supportsReasoning()` 匹配支持 `reasoning_content` 的模型。`reasoning_content` 仅对最后一条助手消息发送以减少 Token 消耗
 
 ### 工具系统
 
 工具是 LLM 与用户环境交互的机制。每个工具实现 `Tool` 接口，通过插件式 `ToolRegistry` 注册（支持运行时动态添加/移除）。
 
-六个内置工具：
+11 个内置工具：
 
-| 工具 | 描述 |
-|---|---|
-| read_file | 读取文件内容（截断至 30,000 字符） |
-| write_file | 写入内容到文件（自动创建目录） |
-| edit_file | 替换文件中的精确字符串 |
-| execute_shell | 运行 shell 命令（带超时） |
-| list_directory | 列出目录树（可配置深度） |
-| search_files | 在文件中搜索文本模式 |
+| 工具 | 描述 | 破坏性？ |
+|---|---|---|
+| `read_file` | 读取文件内容（支持行范围，100KB 限制） | 否 |
+| `write_file` | 写入内容到文件（自动创建目录） | **是** |
+| `edit_file` | 替换文件中的精确字符串 | **是** |
+| `execute_shell` | 运行 shell 命令（带超时，最长 5 分钟） | **是** |
+| `list_directory` | 列出目录树（默认 500 条，最多 2000 条） | 否 |
+| `search_files` | 在文件中搜索文本模式（支持正则和隐藏文件） | 否 |
+| `memory_write` | 写入持久化记忆条目 | 否 |
+| `memory_read` | 读取持久化记忆条目 | 否 |
+| `web_search` | Web 搜索（Mojeek/SearXNG/DuckDuckGo） | 否 |
+| `code_search` | 代码符号搜索（需先运行 `/index`） | 否 |
+| `agent_open` | 委派研究任务给只读子代理 | 否 |
 
-**安全性**：在破坏性操作（write_file、edit_file、execute_shell）之前，执行器会显示 diff 预览并请求用户确认，提供三个选项：是、本次会话全部允许、否。
+**安全性**：在破坏性操作（write_file、edit_file、execute_shell）之前，执行器会显示 diff 预览并请求用户确认，提供三个选项：是、本次会话全部允许、否。Workspace 级别权限文件（`.codegrunt/permissions.json`）可覆盖每个工具的行为（allow/deny/ask），选择器在 `process-tools-helpers.ts` 中管理。
 
 ### 管道引擎（src/core/pipeline/）
 
@@ -393,7 +442,7 @@ Intentor 优先使用快速启发式规则：
 | 阶段 | 文件 | 职责 |
 |---|---|---|
 | PrepareContext | `prepare-context.ts` | 构建系统提示、注入项目指南、初始化消息 |
-| StreamResponse | `stream-response.ts` | 流式调用 LLM、累积文本/推理/工具调用 |
+| StreamResponse | `stream-response.ts` | 流式调用 LLM、累积文本/推理/工具调用；转发真实缓存命中/未命中 Token 数 |
 | ProcessToolCalls | `process-tools.ts` | 解析工具调用、通过 executor 执行、注入结果 |
 | ProcessToolHelpers | `process-tools-helpers.ts` | yes-for-all 会话级状态管理 |
 | PostProcess | `post-process.ts` | 盲写警告检测、Token 统计、最终输出格式化 |
@@ -406,16 +455,91 @@ ContextManager 维护对话历史：
 
 - **Token 估算**：使用简单的 4:1 字符与 Token 比率。
 - **裁剪**：当估算的 Token 数超过预算时，移除最旧的非系统消息。
-- **预算**：聊天模型默认 90,000 Token（128K 上下文窗口减去输出空间）；推理模型 100,000 Token（1M 上下文窗口）。
+- **预算**：聊天模型默认 90,000 Token；推理模型 100,000 Token。
+- **自动压缩**（`compact.ts`）：在 Token 预算达到 50% 或非系统消息超过 30 条时触发。保留最近的 15 条消息，生成最多 1500 Token 的摘要。使用分层块式压缩策略处理大量历史。
 
 ### 提供商系统
 
-所有 LLM 后端实现 LLMProvider 接口。StreamChunk 联合类型支持：
+所有 LLM 后端实现 LLMProvider 接口。`StreamChunk` 联合类型支持：
 
-- text_delta — 增量文本输出
-- reasoning_delta — 思维链推理（显示为 Thinking...）
-- tool_call_delta — 流式工具调用参数
-- finish — 流结束，包含结束原因
+- `text_delta` — 增量文本输出
+- `reasoning_delta` — 思维链推理（显示为 Thinking...）
+- `tool_call_delta` — 流式工具调用参数
+- `finish` — 流结束，包含结束原因
+
+DeepSeek 提供商实现包括：
+- 指数退避重试：429、5xx 或 `ECONNRESET` 错误时最多重试 3 次（延迟 1s → 2s → 4s）
+- 流式工具调用参数累积
+- Token 用量追踪
+
+### 子代理系统（src/core/agent/subagent.ts）
+
+`agent_open` 工具可将独立研究任务委派给只读子代理：
+
+- **只读工具集**：限制使用 `read_file`、`search_files`、`list_directory`、`code_search`、`web_search`、`memory_read`。无 `write_file`/`edit_file`/`execute_shell` 权限
+- **隔离上下文**：子代理获得全新的 `Message[]` 数组，看不到主代理的对话历史
+- **模型降级**：始终降级为 `deepseek-v4-flash`（与 Intentor 分类调用相同策略）
+- **同步执行**：当前为同步单次执行，调用阻塞直至子代理生成最终答案或达到迭代上限（10 次）
+
+### 记忆系统（src/core/memory/）
+
+- **持久化记忆存储**（`store.ts`）：使用 JSONL 文件存储在 `~/.codegrunt/memory/entries.jsonl`。支持写入、读取、删除和按类型过滤（user/feedback/project/reference）。还支持按工作目录存储会话摘要
+- **习惯学习**（`habits.ts`）：自动分析用户的语言偏好（中文/英文）、回答详细程度（精简/详细）、工具确认行为（yes-all/谨慎审查）和任务风格偏好（编码/问答）。达到统计阈值后将学习结果持久化为记忆条目，供后续交互参考
+
+### 代码符号索引（src/core/index/index.ts）
+
+通过 `/index` 命令构建轻量级代码符号索引：
+
+- 无需外部依赖，无需嵌入模型
+- 使用 `git ls-files` 或目录遍历收集源文件
+- 通过 grep 模式提取函数/类/接口/类型/导出
+- 支持 TypeScript、JavaScript、Python、Go、Rust
+- 索引存储在 `~/.codegrunt/index/<hash>/index.json`
+- `code_search` 工具使用该索引进行快速符号查找
+
+### Workspace 权限（src/core/permissions/index.ts）
+
+`.codegrunt/permissions.json` 文件提供工具级别的权限覆盖：
+
+- `allow` — 跳过确认提示
+- `deny` — 硬拦截，工具调用直接失败
+- `ask` — 始终提示确认（即使在 auto 模式或 yes-for-all 状态下）
+
+### 自动快照（src/core/snapshot/index.ts）
+
+每次编码轮次后自动创建 side-git 快照：
+
+- 使用独立的 git 目录（`.codegrunt/git`），不污染用户 .git 历史
+- 快照存储在 "snapshots" 分支上
+- 可通过 `/restore` 命令查看和恢复
+
+### 钩子系统（src/core/hooks/registry.ts）
+
+支持用户自定义钩子脚本，放置在 `~/.codegrunt/hooks/`：
+
+- 四个触发点：`user-prompt-submit`、`pre-tool-use`、`post-tool-use`、`stop`
+- 支持 Shell 脚本（.sh/.bash）和 JS 脚本（.js/.mjs/.cjs）
+- 脚本接收 JSON 事件输入，返回 `continue`/`block`/`modify` 响应
+- 超时（10 秒）或非零退出视为 `continue`，不会导致 Agent 崩溃
+
+### 语言诊断（src/core/lsp/checker.ts）
+
+文件编辑后自动运行项目语言诊断：
+
+- TypeScript：`tsc --noEmit --skipLibCheck`
+- Python：`pyright`（带 pyproject.toml/setup.py 的项目）
+- Go：`go vet`（带 go.mod 的项目）
+- Rust：`cargo check`（带 Cargo.toml 的项目）
+- ESLint：`eslint`（带 ESLint 配置的项目）
+- 诊断结果格式化后注入 Agent 上下文
+
+### MCP 集成（src/core/mcp/）
+
+支持 Model Context Protocol 服务器：
+
+- 支持 stdio 和 SSE 传输
+- MCP 服务器配置存储在 `~/.codegrunt/mcp.json`
+- MCP 工具自动包装为 CodeGrunt 工具并注入 ToolRegistry
 
 ### 可观测性
 
@@ -427,6 +551,7 @@ ContextManager 维护对话历史：
   - 错误自动发布到 EventBus
 - **Metrics**（`observability/metrics.ts`）：计数器/计时器/快照，支持遥测摘要输出
 - **EventBus**（`events/bus.ts`）：类型化事件总线，覆盖管道、工具、LLM、对话等全部生命周期事件
+- **Usage 追踪**（`usage.ts`）：共享 Token 用量模块（`addUsage`、`getSessionUsage`、`getLastCallUsage`），从 `loop.ts` 提取以避免循环依赖
 
 ### Ink/React 终端 UI（`src/cli/ink/`）
 
@@ -488,7 +613,7 @@ const provider = new MyProvider(config);
 你的提供商必须：
 
 1. 接受 OpenAI 兼容格式的 Message[]
-2. 返回 AsyncIterable
+2. 返回 AsyncIterable<StreamChunk>
 3. 支持 AbortSignal 用于取消
 4. 处理工具定义（通过 options.tools 传递）
 5. 尊重 options.model、options.maxTokens、options.temperature
@@ -535,16 +660,16 @@ export const myTool: Tool = {
 
 ### 步骤 2：注册工具
 
-添加到 src/core/tools/registry.ts 的 `ToolRegistry.registerBuiltins()` 方法中：
+在 `src/core/tools/registry.ts` 的 `registerBuiltins()` 方法中添加：
 
 ```typescript
 import { myTool } from './my_tool.js';
-// 在 registerBuiltins() 数组中添加 myTool,
+// 在 builtins 数组中添加 myTool
 ```
 
 ### 步骤 3：添加安全确认（如果是破坏性操作）
 
-在 src/core/tools/executor.ts 的 `executeTool()` 中添加确认逻辑（参考 edit_file/write_file 的处理方式）。
+破坏性工具需要实现 diff 预览和确认流程。确认逻辑在 `process-tools-helpers.ts` 中（`executeToolCall` 函数）。确认后将结果注入消息历史。
 
 ### 步骤 4：编写测试
 
@@ -572,14 +697,17 @@ CodeGrunt 在交互式 REPL 中提供了一组斜杠命令，实现在 `src/cli/
 | `/help` | 显示可用命令和当前配置 |
 | `/model <名称>` | 切换活跃的 LLM 模型（无参数时交互式选择） |
 | `/init` | 分析代码库并生成 CODEGRUNT.md 项目指南 |
+| `/index` | 构建代码符号索引，加速 code_search 工具 |
 | `/clear` | 清除对话历史 |
-| `/compact` | 总结并压缩对话历史以节省 Token |
+| `/compact` | 总结并压缩对话历史以节省 Token（分层块式压缩） |
 | `/review` | 审查会话变更中的逻辑问题 |
-| `/cost` | 显示当前会话的 Token 使用量和预估费用 |
+| `/cost` | 显示当前会话的 Token 使用量和预估费用（含缓存命中/未命中统计） |
 | `/balance` | 显示账户余额和用量（今日 / 本月） |
 | `/config` | 显示或更改配置设置 |
 | `/reasoning` / `/effort` | 设置 R1 模型的推理强度（low/medium/high） |
-| `/skills` | 列出和管理技能（创建、列表） |
+| `/skills` | 列出和管理技能（创建、列表、安装） |
+| `/search-engine` | 切换 Web 搜索用的搜索引擎 |
+| `/restore` | 从自动快照恢复工作状态 |
 
 ---
 
@@ -613,7 +741,7 @@ codegrunt "总结 @https://example.com/docs/api"
 3. 对于 URL：获取 URL 内容并内联
 4. 展开后的内容作为用户消息的一部分发送给 LLM
 
-这在提供上下文时特别有用，无需手动复制文件内容。
+目录扫描跳过 `node_modules`、`.git`、`dist`、`.next`、`__pycache__`、`.cache`。
 
 ---
 
@@ -698,6 +826,8 @@ CodeGrunt 的配置加载链（优先级从高到低）：
 | 日志级别 | `CODEGRUNT_LOG_LEVEL` | `info` |
 | 文件日志 | `CODEGRUNT_LOG_FILE` | 启用 |
 | 详细输出 | `CODEGRUNT_VERBOSE` | 禁用 |
+| 搜索引擎 | `CODEGRUNT_SEARCH_ENGINE` | `mojeek` |
+| SearXNG URL | `CODEGRUNT_SEARXNG_URL` | — |
 
 ### 模型判断逻辑（`src/config.ts`）
 
@@ -705,6 +835,35 @@ CodeGrunt 的配置加载链（优先级从高到低）：
 - `supportsReasoning(model)`：检测是否支持 reasoning_content（R1 模型 + V4 Pro 模型）
 - 推理模型：使用更大的上下文预算（`CONTEXT_BUDGET = 100_000`），不支持 temperature 参数
 - 聊天模型：使用标准预算（`CHAT_CONTEXT_BUDGET = 90_000`），支持全部参数
+
+---
+
+## 钩子系统
+
+### 目录结构
+
+用户钩子脚本放置在 `~/.codegrunt/hooks/` 目录。
+
+### 事件类型
+
+| 事件名 | 触发时机 | 脚本命名 |
+|---|---|---|
+| `user-prompt-submit` | 用户提交提示后 | `user-prompt-submit.*` |
+| `pre-tool-use` | 工具执行前 | `pre-tool-use.*` |
+| `post-tool-use` | 工具执行后 | `post-tool-use.*` |
+| `stop` | 会话停止时 | `stop.*` |
+
+### 脚本格式
+
+脚本接收 stdin 上的 JSON 事件，必须在 stdout 上返回 JSON 响应：
+
+```json
+{ "action": "continue" }
+{ "action": "block", "reason": "..." }
+{ "action": "modify", "data": { ... } }
+```
+
+支持的语言：Shell（.sh, .bash）和 JavaScript（.js, .mjs, .cjs）。
 
 ---
 

@@ -1,76 +1,19 @@
 import chalk from 'chalk';
 import type { TaskPlan, EvaluationResult, IntentResult } from '../core/pipeline/types.js';
-import { ACCENT } from './constants.js';
+import { ACCENT, muted } from './constants.js';
+import { formatErrorForDisplay } from '../core/errors.js';
+import { write as chWrite } from '../cli/ink/output-channel.js';
 
 const blue  = (s: string) => chalk.hex(ACCENT)(s);
-const muted = chalk.gray;
-const successColor = chalk.green;
 const danger  = chalk.red;
 const warning = chalk.yellow;
 
-// ── Tool argument extraction ────────────────────────────────────────────
+// ── Tool spinner re-export ──────────────────────────────────────────────
+// ToolSpinner lives in tool-spinner.ts so pipeline stages don't need to pull
+// in all the P/G/E display helpers just to get a spinner.
+export { createToolSpinner, type ToolSpinner } from './tool-spinner.js';
 
-function extractToolKey(args: Record<string, unknown>): { key: string; val: string } {
-  const KEY_PRIORITY = ['path', 'command', 'pattern', 'query', 'file_path'];
-  const key = KEY_PRIORITY.find(k => k in args) ?? Object.keys(args)[0] ?? '';
-  const val = key
-    ? (typeof args[key] === 'string' && (args[key] as string).length > 60
-        ? (args[key] as string).slice(0, 60) + '…'
-        : String(args[key]))
-    : '';
-  return { key, val };
-}
-
-// ── Tool execution spinner ──────────────────────────────────────────────
-
-const SPINNER_FRAMES = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
-
-export interface ToolSpinner {
-  done(ok: boolean, durationMs: number, errorMsg?: string): void;
-}
-
-/**
- * Create an in-progress spinner for a tool call. Writes a single line like
- * "  ⠋ read_file  src/x.ts  3s" and updates the spinner frame + elapsed time
- * in-place using \r until done() is called.
- */
-export function createToolSpinner(name: string, args: Record<string, unknown>): ToolSpinner {
-  const { val } = extractToolKey(args);
-  const label = muted(name) + (val ? '  ' + chalk.white(val) : '');
-  const isTTY = process.stdout.isTTY;
-  const startTime = Date.now();
-  let frameIdx = 0;
-  let active = true;
-
-  if (isTTY) {
-    process.stdout.write('\r  ' + muted(SPINNER_FRAMES[frameIdx]) + ' ' + label);
-  }
-
-  const interval = isTTY ? setInterval(() => {
-    if (!active) return;
-    frameIdx = (frameIdx + 1) % SPINNER_FRAMES.length;
-    const f = SPINNER_FRAMES[frameIdx];
-    const elapsed = Math.floor((Date.now() - startTime) / 1000);
-    const elapsedStr = elapsed > 0 ? muted(` ${elapsed}s`) : '';
-    process.stdout.write('\r  ' + muted(f) + ' ' + label + elapsedStr);
-  }, 80) : null;
-
-  return {
-    done(ok: boolean, durationMs: number, errorMsg?: string): void {
-      active = false;
-      if (interval) clearInterval(interval);
-      const icon = ok ? successColor('✓') : danger('✗');
-      const durationStr = muted(` (${durationMs}ms)`);
-      const prefix = isTTY ? '\r' : '';
-      if (ok) {
-        process.stdout.write(prefix + '  ' + icon + ' ' + label + durationStr + '\n');
-      } else {
-        const errShort = (errorMsg ?? '').slice(0, 80);
-        process.stdout.write(prefix + '  ' + icon + ' ' + label + durationStr + '  ' + danger(errShort) + '\n');
-      }
-    },
-  };
-}
+// ── CLI Display Helpers ─────────────────────────────────────────────────
 
 export function printAssistantHeader(): void {
   // Silent by default — the separator line is visual noise.
@@ -81,18 +24,37 @@ export function printAssistantHeader(): void {
   const labelLen = ' CodeGrunt '.length;
   const fill = Math.max(0, cols - labelLen - 2);
   const half = Math.floor(fill / 2);
-  process.stdout.write(
+  chWrite(
     '\n' + muted('-'.repeat(half)) + label + muted('-'.repeat(fill - half)) + '\n\n'
   );
 }
 
 export function printThinkingCollapsed(reasoningText: string, elapsedMs: number): void {
   const secs = Math.round(elapsedMs / 1000);
-  process.stdout.write(muted(`  thought for ${secs}s\n\n`));
+  chWrite(muted(`  thought for ${secs}s\n\n`));
 }
+
+// printError/printTypedError intentionally still write directly to stderr,
+// NOT through output-channel.ts — that module only has a stdout-routed
+// writeLine(), and these two are called from repl.ts's/index.ts's top-level
+// catch blocks, which only run AFTER runAgentLoop's promise has already
+// settled (i.e. after App.setBusy(false) — see the "3/7" and "5/7" commits).
+// The live region is idle by then, so a raw stderr write is safe — it won't
+// race with anything Ink is actively redrawing. Known residual gap: an
+// error path that fires WHILE the live region is active (there isn't one
+// today) would need output-channel.ts to grow stderr support first.
 
 export function printError(message: string): void {
   process.stderr.write(danger('  error  ') + message + '\n');
+}
+
+/** Like printError, but branches the label on the error's type (network / api /
+ *  config / tool / timeout / cancelled) via formatErrorForDisplay() instead of
+ *  always showing the generic "error" label — lets the user tell "DeepSeek is
+ *  down" apart from "your API key is wrong" apart from "you hit Esc" at a glance. */
+export function printTypedError(err: unknown): void {
+  const { label, message } = formatErrorForDisplay(err);
+  process.stderr.write(danger(`  ${label}  `) + message + '\n');
 }
 
 // ── P/G/E Plan & Evaluation Display ─────────────────────────────────────
@@ -103,9 +65,9 @@ export function printError(message: string): void {
 export function printIntentResult(intent: IntentResult): void {
   if (!process.env['CODEGRUNT_VERBOSE']) return;
   if (intent.matchedSkill) {
-    process.stdout.write(muted(`  skill: ${intent.matchedSkill.name}\n`));
+    chWrite(muted(`  skill: ${intent.matchedSkill.name}\n`));
   } else if (!intent.isCoding) {
-    process.stdout.write(muted('  chat mode\n'));
+    chWrite(muted('  chat mode\n'));
   }
 }
 
@@ -113,14 +75,67 @@ export function printIntentResult(intent: IntentResult): void {
 export function printPlanHeader(plan: TaskPlan): void {
   if (!process.env['CODEGRUNT_VERBOSE']) return;
   const stepCount = plan.steps.length;
-  process.stdout.write('\n  ' + blue('▸') + '  ' + chalk.bold(plan.goal) + muted(`  (${stepCount} steps)`) + '\n');
+  chWrite('\n  ' + blue('▸') + '  ' + chalk.bold(plan.goal) + muted(`  (${stepCount} steps)`) + '\n');
 }
 
 /** Display current step progress — silent by default */
 export function printStepProgress(stepIndex: number, totalSteps: number, description: string): void {
   if (!process.env['CODEGRUNT_VERBOSE']) return;
   const truncated = description.length > 60 ? description.slice(0, 60) + '…' : description;
-  process.stdout.write('\n' + muted(`  ${stepIndex + 1}/${totalSteps}  `) + truncated + '\n');
+  chWrite('\n' + muted(`  ${stepIndex + 1}/${totalSteps}  `) + truncated + '\n');
+}
+
+// ── /plan Tree Visualization (v0.8) ──────────────────────────────────────
+// Status per step, mirroring how coding-flow.ts drives the retry loop:
+//   'pending'     — not started yet
+//   'in_progress' — currently running (including refine retries)
+//   'done'        — evaluator passed (or user chose to continue past failure)
+//   'failed'      — max retries exhausted and user rejected continuing
+export type PlanStepStatus = 'pending' | 'in_progress' | 'done' | 'failed';
+
+// Matches the ✓/✗ glyphs used by the tool-execution spinner (tool-spinner.ts)
+// so "done"/"failed" reads as the same concept everywhere in the UI.
+const STEP_ICONS: Record<PlanStepStatus, string> = {
+  pending: ' ',
+  in_progress: '→',
+  done: '✓',
+  failed: '✗',
+};
+
+function stepIconColor(status: PlanStepStatus, icon: string): string {
+  switch (status) {
+    case 'done': return chalk.green(icon);
+    case 'failed': return danger(icon);
+    case 'in_progress': return blue(icon);
+    default: return muted(icon);
+  }
+}
+
+/**
+ * Render a TaskPlan as an ASCII tree with per-step status icons.
+ * Pure function (no I/O) so it can be unit tested directly; printPlanTree()
+ * below is the side-effecting wrapper gated by CODEGRUNT_VERBOSE.
+ */
+export function renderPlanTree(plan: TaskPlan, stepStatuses: PlanStepStatus[]): string {
+  const lines: string[] = [];
+  lines.push(blue('▸') + '  ' + chalk.bold(plan.goal) + muted(`  (${plan.steps.length} steps)`));
+
+  plan.steps.forEach((step, i) => {
+    const status = stepStatuses[i] ?? 'pending';
+    const isLast = i === plan.steps.length - 1;
+    const branch = isLast ? '└─' : '├─';
+    const icon = stepIconColor(status, STEP_ICONS[status]);
+    const desc = status === 'failed' ? danger(step.description) : step.description;
+    lines.push(`  ${muted(branch)} ${icon} ${desc}`);
+  });
+
+  return lines.join('\n');
+}
+
+/** Print the plan tree (with live step statuses) — silent by default */
+export function printPlanTree(plan: TaskPlan, stepStatuses: PlanStepStatus[]): void {
+  if (!process.env['CODEGRUNT_VERBOSE']) return;
+  chWrite('\n' + renderPlanTree(plan, stepStatuses) + '\n');
 }
 
 /** Display evaluation result — silent unless DEBUG or CODEGRUNT_VERBOSE */
@@ -128,14 +143,14 @@ export function printEvaluation(evaluation: EvaluationResult, _language: 'zh' | 
   if (evaluation.passed) return;
   if (!process.env['DEBUG'] && !process.env['CODEGRUNT_VERBOSE']) return;
   const scoreColor = evaluation.score >= 60 ? warning : danger;
-  process.stdout.write('  ' + danger('✗') + '  ' + scoreColor(`${evaluation.score}/100`) + '\n');
+  chWrite('  ' + danger('✗') + '  ' + scoreColor(`${evaluation.score}/100`) + '\n');
   for (const issue of evaluation.issues.slice(0, 2)) {
-    process.stdout.write('  ' + muted('  ') + danger(String(issue).slice(0, 100)) + '\n');
+    chWrite('  ' + muted('  ') + danger(String(issue).slice(0, 100)) + '\n');
   }
 }
 
 /** Display refinement retry indicator — silent by default */
 export function printRefineIndicator(retryCount: number, maxRetries: number, _language: 'zh' | 'en'): void {
   if (!process.env['CODEGRUNT_VERBOSE']) return;
-  process.stdout.write(muted(`  retrying ${retryCount}/${maxRetries}…\n`));
+  chWrite(muted(`  retrying ${retryCount}/${maxRetries}…\n`));
 }

@@ -13,6 +13,9 @@ import { executeShellTool } from './execute_shell.js';
 import { listDirectoryTool } from './list_directory.js';
 import { searchFilesTool } from './search_files.js';
 import { memoryWriteTool, memoryReadTool } from './memory.js';
+import { webSearchTool } from './web_search.js';
+import { codeSearchTool } from './code_search.js';
+import { agentOpenTool } from './agent_open.js';
 import { getLogger } from '../observability/logger.js';
 
 const log = getLogger('tools:registry');
@@ -92,6 +95,9 @@ class ToolRegistry {
       searchFilesTool,
       memoryWriteTool,
       memoryReadTool,
+      webSearchTool,
+      codeSearchTool,
+      agentOpenTool,
     ];
     for (const tool of builtins) {
       this.register(tool, 'builtin');
@@ -115,3 +121,5 @@ export function getToolDefinitions(): ToolDefinition[] {
 export function getToolByName(name: string): Tool | undefined {
   return getToolRegistry().getByName(name);
 }
+
+export { getToolRegistry };

@@ -70,4 +70,19 @@ describe('edit_file', () => {
     const content = await readFile(filePath, 'utf-8');
     expect(content).toBe('const a = 99;\n');
   });
+
+  it('matches old_string with plain \\n against a file with CRLF line endings (Windows regression)', async () => {
+    const filePath = join(dir, 'crlf.ts');
+    await writeFile(filePath, 'const x = 1;\r\nconst y = 2;\r\n');
+    const result = await editFileTool.execute({
+      path: filePath,
+      old_string: 'const x = 1;\nconst y = 2;',
+      new_string: 'const x = 42;\nconst y = 2;',
+    });
+    expect(result.success).toBe(true);
+    const content = await readFile(filePath, 'utf-8');
+    // The replacement's line ending was conformed to the file's CRLF style,
+    // and untouched trailing content keeps its original \r\n.
+    expect(content).toBe('const x = 42;\r\nconst y = 2;\r\n');
+  });
 });

@@ -8,7 +8,8 @@ import { ContextManager } from '../core/context/manager.js';
 import { startRepl } from './repl.js';
 import { runAgentLoop } from '../core/agent/loop.js';
 import { createInterruptController } from '../utils/interrupt.js';
-import { printError } from '../utils/display.js';
+import { printTypedError } from '../utils/display.js';
+import { writeCrashReport } from '../core/observability/crash-report.js';
 import { runSetup } from './setup.js';
 import { installSkillFromZip, removeSkill, getGlobalSkillsDir } from './skills.js';
 
@@ -31,7 +32,8 @@ program
   .argument('[task]', 'One-shot task to execute (omit for interactive mode)')
   .option('-m, --model <model>', 'Model to use')
   .option('--max-tokens <n>', 'Max tokens per response', parseInt)
-  .action(async (task: string | undefined, opts: { model?: string; maxTokens?: number }) => {
+  .option('--resume [id]', 'Resume a previous session (omit id for interactive picker)')
+  .action(async (task: string | undefined, opts: { model?: string; maxTokens?: number; resume?: string | boolean }) => {
     let config = await loadConfig();
 
     if (opts.model) config.model = opts.model;
@@ -45,6 +47,29 @@ program
 
     const provider = new DeepSeekProvider(config);
     const bus = getDefaultEventBus();
+
+    // ── Resolve --resume to a session ID ─────────────────────────────────────
+    let resumeSessionId: string | undefined;
+    if (opts.resume !== undefined) {
+      const { listSessions, loadSession, listAllSessions, formatSessionEntry } = await import('../core/session/store.js');
+      const { selectFromList } = await import('../utils/select.js');
+      const cwd = process.cwd();
+
+      if (typeof opts.resume === 'string') {
+        // --resume <id> passed directly
+        resumeSessionId = opts.resume;
+      } else {
+        // --resume with no id — show interactive picker
+        const sessions = await listSessions(cwd);
+        if (sessions.length === 0) {
+          process.stdout.write(chalk.yellow('No saved sessions found for this directory.\n'));
+        } else {
+          const choices = sessions.map(s => ({ label: formatSessionEntry(s), value: s.id }));
+          const picked = await selectFromList('Resume session:', choices);
+          if (picked) resumeSessionId = picked;
+        }
+      }
+    }
 
     // No bus.on('error') handler here — Logger already writes errors to stderr
     // and emitting log.error from a bus error handler creates an infinite loop.
@@ -66,11 +91,12 @@ program
         process.stdout.write('\n');
         log.info('One-shot task completed');
       } catch (err) {
-        if ((err as Error)?.name === 'AbortError' || interrupt.signal.aborted) {
+        const errName = (err as Error)?.name;
+        if (errName === 'AbortError' || errName === 'UserAbortError' || interrupt.signal.aborted) {
           process.stdout.write(chalk.yellow('\nInterrupted.\n'));
           log.info('One-shot task interrupted by user');
         } else {
-          printError(err instanceof Error ? err.message : String(err));
+          printTypedError(err);
           bus.emit({
             type: 'error',
             source: 'cli',
@@ -78,6 +104,10 @@ program
             stack: err instanceof Error ? err.stack : undefined,
             timestamp: Date.now(),
           });
+          if (config.crashReportOnError) {
+            const path = await writeCrashReport(err, { cwd: process.cwd(), task, model: config.model });
+            if (path) process.stderr.write(chalk.gray(`  crash report written to ${path}\n`));
+          }
           process.exit(1);
         }
       } finally {
@@ -85,7 +115,7 @@ program
       }
     } else {
       // Interactive REPL mode
-      await startRepl(config, provider);
+      await startRepl(config, provider, resumeSessionId);
     }
   });
 
@@ -158,6 +188,6 @@ program
   });
 
 program.parseAsync(process.argv).catch((err: unknown) => {
-  printError(err instanceof Error ? err.message : String(err));
+  printTypedError(err);
   process.exit(1);
 });
