@@ -14,20 +14,21 @@ Node 18 or newer is required.
 ## Before you open a pull request
 
 ```bash
-npm run typecheck  # tsc --noEmit
-npm run lint       # eslint
-npm test           # vitest
+npm run typecheck     # tsc --noEmit
+npm run lint          # eslint
+npm run format:check  # prettier --check
+npm test              # vitest
 ```
 
-All three must pass. A single test file can be run with
+All four must pass. A single test file can be run with
 `npx vitest run tests/tools/read-file.test.ts`.
 
 ## Project layout
 
-- `src/cli/` terminal UI, slash commands, REPL
-- `src/core/agent/` Intentor, Planner, Generator, Evaluator, sub-agents
-- `src/core/pipeline/` the four-stage pipeline engine and tool execution
-- `src/core/tools/` built-in tools and the tool registry
+- `src/cli/` terminal UI, slash commands (`commands/`), REPL (`repl/`), `/init` (`init/`)
+- `src/core/agent/` Intentor, Planner, Generator, Evaluator, step runner, orchestrator/workers, sub-agents
+- `src/core/pipeline/` the four-stage pipeline engine; tool execution lives in `src/core/tools/tool-executor.ts` + `src/core/policy/`
+- `src/core/tools/` built-in tools, the tool registry, and shared tool infrastructure
 - `src/providers/` LLM provider adapters
 
 See `CLAUDE.md` and `docs/development-guide.md` for the architecture.

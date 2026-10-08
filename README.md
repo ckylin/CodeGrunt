@@ -26,6 +26,7 @@ codegrunt "把 auth 模块重构为 async/await"
 ## 特性
 
 - **🤖 P/G/E 智能代理** — 使用 Intentor → Planner → Generator → Evaluator 四阶段架构：意图分类（含 Skill 自动匹配 + Continuation 检测）→ 任务分解 → 管道执行（支持步骤内多轮工具调用）→ 质量评估与自动修正（最多 3 次），确保输出质量
+- **🧵 并行编排** — Planner 标记为 `parallelizable` 且目标文件不重叠的连续步骤会被合并为一批，并发派发给可写入的 worker 子代理；失败步骤自动回退为串行重试，目标文件冲突的步骤始终串行
 - **🧠 子代理系统** — `agent_open` 工具可将独立研究任务委派给只读子代理，避免主上下文被中间工具调用结果污染
 - **📂 理解代码库** — 通过 `@` 文件引用、项目指南文件（`CODEGRUNT.md` / `CLAUDE.md`）和代码符号索引（`/index`）理解你的项目结构
 - **🔌 DeepSeek 驱动** — 内置支持 DeepSeek Chat、V4 Flash、V4 Pro 和 R1 推理模型，支持根据任务复杂度自动路由模型
@@ -246,6 +247,8 @@ CodeGrunt 通过环境变量或 `~/.codegrunt/config.json` 文件配置。
 npm run dev        # 开发模式，热重载 (tsx)
 npm run build      # 编译 TypeScript 到 dist/
 npm run typecheck  # 仅类型检查，不输出文件
+npm run lint       # ESLint 检查 (src + tests)
+npm run format:check  # Prettier 格式检查
 npm test           # 运行 vitest 测试套件
 npm start          # 运行编译后的 dist/cli/index.js
 

@@ -28,6 +28,7 @@ codegrunt "refactor the auth module to use async/await"
 ## Features
 
 - **🤖 P/G/E Agentic Coding** — Intentor → Planner → Generator → Evaluator four-phase architecture: intent classification (with auto skill matching + continuation detection) → task decomposition → pipeline execution (multi-turn tool calls per step) → quality evaluation with auto-refine (max 3 retries)
+- **🧵 Parallel orchestration** — consecutive plan steps marked `parallelizable` with non-overlapping target files are merged into one batch and dispatched concurrently to write-capable worker sub-agents; failed steps fall back to a serial retry, and steps whose target files overlap always stay serial
 - **🧠 Sub-agent System** — `agent_open` tool delegates focused research tasks to a read-only sub-agent, preventing main context bloat from intermediate tool results
 - **📂 Codebase-aware** — understands your project structure via `@` file references, project guide files (`CODEGRUNT.md` / `CLAUDE.md`), and a code symbol index (`/index`)
 - **🔌 DeepSeek powered** — ships with DeepSeek Chat, V4 Flash, V4 Pro, and R1 reasoner models, with automatic model routing based on task complexity
@@ -250,6 +251,8 @@ The config file is auto-generated on first run via the setup wizard. Environment
 npm run dev        # dev mode with watch (tsx)
 npm run build      # compile TypeScript to dist/
 npm run typecheck  # type check only, no emit
+npm run lint       # eslint (src + tests)
+npm run format:check  # prettier check
 npm test           # run vitest test suite
 npm start          # run compiled dist/cli/index.js
 

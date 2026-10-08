@@ -89,13 +89,15 @@ codegrunt/
 │   ├── cli/                  # CLI 入口、REPL、参数解析
 │   │   ├── index.ts          # 入口（commander 驱动的 CLI）
 │   │   ├── repl.ts           # 交互式 REPL 循环
-│   │   ├── commands/         # 斜杠命令（/help, /model, /init 等）
+│   │   ├── repl/             # REPL 辅助模块（配置应用、恢复、会话记录）
+│   │   ├── commands/         # 斜杠命令（/help, /model, /init 等，按功能域分文件 + registry）
 │   │   ├── branch-commands.ts # /branch, /tree, /switch, /subagent-cache 处理
 │   │   ├── setup.ts          # 首次运行设置向导
-│   │   ├── init.ts           # /init 命令实现：代码库分析 + CODEGRUNT.md 生成
+│   │   ├── init/             # /init 命令实现（index/prompt/scan）
 │   │   ├── skills.ts         # 技能加载和管理（含 zip 安装）
 │   │   ├── update.ts         # 版本检查和升级
 │   │   ├── banner.ts         # ASCII 艺术横幅
+│   │   ├── terminal-compat.ts # 终端兼容性处理
 │   │   ├── at-resolver.ts    # @文件/@URL 引用展开
 │   │   └── ink/              # Ink/React 常驻终端 UI
 │   │       ├── App.tsx           # 常驻 REPL 树（历史 + 实时区 + 状态栏 + 输入）
@@ -103,7 +105,8 @@ codegrunt/
 │   │       ├── StatusBar.tsx     # 状态栏（模型 · Git 分支 · Token / 忙碌倒计时）
 │   │       ├── Dropdown.tsx      # 自动补全下拉菜单
 │   │       ├── ListPicker.tsx    # 方向键列表选择器
-│   │       ├── output-channel.ts # 输出路由（sink/实时区）+ picker 注册表
+│   │       ├── editing.ts        # 编辑按键纯函数（行/词移动、删除、滚动窗口）
+│   │       ├── useTerminalSize.ts # 跟随终端 resize 的宽高
 │   │       ├── useAutocomplete.ts # 文件/命令/Skill 补全逻辑
 │   │       ├── useHistory.ts     # 持久化历史记录
 │   │       ├── git-branch.ts     # 当前 Git 分支获取
@@ -116,12 +119,17 @@ codegrunt/
 │   │   │   ├── planner.ts    # 任务规划器（分解为多步骤计划）
 │   │   │   ├── generator.ts  # 共享生成器（4 阶段管道 runner）
 │   │   │   ├── evaluator.ts  # 质量评估器（输出检查 + 自动修正）
+│   │   │   ├── step-runner.ts # 单个计划步骤：生成 → 评估 → 修正重试
+│   │   │   ├── orchestrator.ts # 计划批次编排（串行/并行分组）
+│   │   │   ├── worker.ts     # 可写入的 worker 子代理（runSubagent 变体）
 │   │   │   ├── chat-flow.ts  # 聊天流程（跳过 Planner/Evaluator）
 │   │   │   ├── coding-flow.ts # 编码流程（P/G/E）
 │   │   │   ├── skill-flow.ts # Skill 流程（inline / subagent）
+│   │   │   ├── tool-loop.ts  # 聊天/Skill 流程共用的迭代工具循环
 │   │   │   ├── complexity.ts # 请求分类器 + 思考模式路由器
 │   │   │   ├── r1-harvester.ts # R1 思考内容工具调用回收
 │   │   │   ├── subagent.ts   # 只读子代理执行引擎（同步 + 并发）
+│   │   │   ├── subagent-runtime.ts # 子代理类型、每轮上下文与 runner 接缝
 │   │   │   └── subagent-cache.ts # 子代理结果缓存
 │   │   ├── pipeline/         # Harness 风格管道引擎（4 阶段）
 │   │   │   ├── engine.ts     # PipelineEngine：阶段执行器 + Builder
@@ -132,14 +140,23 @@ codegrunt/
 │   │   │       ├── process-tools.ts     # 工具调用解析 + 执行 + 结果注入
 │   │   │       ├── (see src/core/tools/tool-executor.ts and src/core/policy/)
 │   │   │       └── post-process.ts      # 后处理：盲写警告、Token 统计、R1 回收
+│   │   ├── policy/           # 工具策略：信任模式状态、审批门、确认策略
+│   │   │   ├── state.ts      # trust mode / yes-for-all / workspace 权限
+│   │   │   ├── gates.ts      # 必需参数 → workspace deny → plan 模式
+│   │   │   └── confirm.ts    # 各工具的确认策略（diff 预览等）
+│   │   ├── output/
+│   │   │   └── output-channel.ts # 输出路由（sink/实时区）+ picker 注册表
 │   │   ├── tools/
-│   │   │   ├── registry.ts   # 插件式 ToolRegistry（运行时注册/移除）
+│   │   │   ├── registry.ts   # 插件式 ToolRegistry（运行时注册/移除）+ trait 查询
 │   │   │   ├── read-file.ts / write-file.ts / edit-file.ts
 │   │   │   ├── execute-shell.ts / list-directory.ts / search-files.ts
 │   │   │   ├── memory.ts     # memory_write / memory_read 工具
-│   │   │   ├── web-search.ts # Web 搜索工具
+│   │   │   ├── web-search.ts # Web 搜索工具（引擎见 web-search/engines/）
 │   │   │   ├── code-search.ts # 代码符号搜索工具
-│   │   │   └── agent-open.ts # 子代理委派工具
+│   │   │   ├── agent-open.ts # 子代理委派工具
+│   │   │   ├── tool-executor.ts # executeToolCall：修复参数 → 审批门 → 确认 → 执行
+│   │   │   ├── truncate.ts / path-utils.ts / args-repair.ts / edit-diff.ts
+│   │   │   └── file-mutation-queue.ts / output-accumulator.ts # 共享工具基础设施
 │   │   ├── context/
 │   │   │   ├── manager.ts    # 追加式上下文窗口管理（Token 预算、软裁剪）
 │   │   │   ├── compact.ts    # 分层块式对话压缩
@@ -187,12 +204,13 @@ codegrunt/
 │   ├── config.ts             # 配置加载（环境变量、配置文件）
 │   └── types.ts              # 共享 TypeScript 类型和接口
 ├── tests/                    # 镜像 src/ 结构（Vitest）
-│   ├── tools/  agent/  context/  core/  cli/  pipeline/
-│   ├── integration/pipeline-e2e.test.ts
-│   ├── providers/deepseek-retry.test.ts
-│   └── manual/input-test.ts
+│   ├── tools/  agent/  cli/  core/  context/  pipeline/  providers/  utils/
+│   ├── helpers/              # fake-home、mock-provider 等测试辅助
+│   └── integration/pipeline-e2e.test.ts
 ├── docs/                     # 文档
 ├── dist/                     # 编译输出（gitignore）
+├── eslint.config.js
+├── .prettierrc.json
 ├── package.json
 ├── tsconfig.json
 ├── vitest.config.ts
@@ -212,6 +230,8 @@ CodeGrunt 使用标准 TypeScript 编译器（tsc）进行生产构建。
 ```bash
 npm run build          # 编译 src/ → dist/
 npm run typecheck      # 仅类型检查，不输出文件
+npm run lint           # ESLint 检查（src + tests）
+npm run format:check   # Prettier 格式检查
 ```
 
 tsconfig.json 配置要点：
@@ -220,6 +240,7 @@ tsconfig.json 配置要点：
 - module: ESNext — ESM 模块系统
 - moduleResolution: bundler — 兼容 tsx 和 tsc
 - strict: true — 完整严格模式
+- noUnusedLocals: true — 未使用的局部变量/导入视为错误
 - declaration: true — 生成 .d.ts 文件
 - sourceMap: true — 调试源码映射
 - jsx: react-jsx — 为 React/Ink 组件提供 JSX 支持（jsxImportSource: react）
@@ -297,13 +318,20 @@ npx vitest run tests/tools/read-file.test.ts
 npx vitest run tests/tools/write-file.test.ts
 npx vitest run tests/tools/execute-shell.test.ts
 npx vitest run tests/tools/edit-file.test.ts
+npx vitest run tests/tools/tool-behavior.test.ts
+npx vitest run tests/tools/infrastructure.test.ts
+npx vitest run tests/tools/web-search.test.ts
 npx vitest run tests/agent/intentor_planner.test.ts
 npx vitest run tests/agent/subagent.test.ts
+npx vitest run tests/agent/coding-flow.test.ts
+npx vitest run tests/agent/orchestrator.test.ts
+npx vitest run tests/agent/worker.test.ts
 npx vitest run tests/context/context_manager.test.ts
 npx vitest run tests/pipeline/engine.test.ts
+npx vitest run tests/pipeline/tool-gates.test.ts
 npx vitest run tests/integration/pipeline-e2e.test.ts
-npx vitest run tests/pipeline/tool-executor.test.ts
 npx vitest run tests/cli/PromptInput.test.tsx
+npx vitest run tests/cli/command-registry.test.ts
 ```
 
 ### 详细输出
@@ -318,16 +346,16 @@ npx vitest --reporter=verbose
 
 ```
 tests/
-├── tools/          # read_file / write_file / edit_file / execute_shell
-├── agent/          # intentor_planner / subagent / r1-harvester / complexity / generator / loop-autocompact
+├── tools/          # read-file / write-file / edit-file / execute-shell / tool-behavior / tool-meta / infrastructure / web-search / memory-code-search
+├── agent/          # intentor_planner / subagent / r1-harvester / complexity / generator / loop-autocompact / coding-flow / chat-flow / skill-flow / orchestrator / worker（+ _flow-harness）
 ├── context/        # context_manager
-├── core/           # permissions / branching / subagent-cache / swebench / mcp / index / embedder / billing / crash-report / errors
-├── cli/            # App / PromptInput / ListPicker / StatusBar / output-channel / paste / git-branch / useAutocomplete / useHistory（Ink 组件测试）
-├── pipeline/       # engine / stages
+├── core/           # permissions / branching / subagent-cache / swebench / mcp / index / embedder / billing / crash-report / errors / event-bus / hooks / logger / metrics / session-store
+├── cli/            # App / PromptInput / ListPicker / StatusBar / output-channel / paste / git-branch / useAutocomplete / useHistory / editing / commands-dispatch / command-registry / init-scan（Ink 组件与命令层测试）
+├── pipeline/       # engine / tool-executor / tool-gates
 ├── integration/    # pipeline-e2e（真实 4 阶段串接）
-├── providers/      # deepseek-retry
+├── providers/      # deepseek-retry / model-policy
 ├── utils/          # constants / danger / interrupt / line-endings / markdown / pager / select / tool-spinner / plan-display
-└── manual/         # input-test（手动输入测试）
+└── helpers/        # fake-home / mock-provider 等测试辅助
 ```
 
 关键特性：
@@ -336,6 +364,7 @@ tests/
 - **隔离的文件系统**：测试使用临时目录以避免副作用。
 - **异步测试**：大多数工具测试是异步的，因为它们涉及 I/O 操作。
 - **Ink 组件测试**：使用 `ink-testing-library` 渲染真实组件（`render`），例如 `tests/cli/PromptInput.test.tsx`。
+- **代理流程测试**：`tests/agent/_flow-harness.ts` 提供假 provider，让 `chat-flow` / `coding-flow` / `skill-flow` / `orchestrator` / `worker` 可以在不访问真实 API 的情况下端到端运行。
 
 ### 编写测试
 
@@ -375,9 +404,11 @@ describe('read_file', () => {
   └──────┬───────┘
          │
     ┌────▼─────────────────────────────────────┐
-    │  Planner → Generator → Evaluator          │
-    │   规划        执行       质量评估           │
+    │  Planner → Orchestrator/Generator →        │
+    │  Evaluator                                  │
+    │   规划   批次编排/执行     质量评估           │
     │        (评估不通过自动修正重试，最多 3 次)    │
+    │        (parallelizable 步骤并发派发给 worker) │
     └──────────────────────────────────────────┘
          │
     ┌────▼──────────┐
@@ -417,6 +448,7 @@ Intentor 优先使用快速启发式规则：
 2. **Generator（生成器）**：管道引擎依次执行每个步骤 → 准备上下文 → 流式 LLM 调用 → 工具执行 → 后处理。现支持**步骤内多轮迭代**——单个步骤内可进行多次工具调用往返
 3. **Evaluator（评估器）**：检查输出质量 / 计划符合度 / 幻觉（覆盖 14 种错误模式）。不通过则注入反馈并重试（最多 3 次）。3 次失败后提示用户是否继续。`pruneRefineMessages()` 在步骤间清理评估反馈消息。编辑后自动运行 `tsc --noEmit`（TypeScript 项目）
 4. `sessionHasRead` 追踪跨步骤的文件读取，避免重复操作
+5. **并行编排（orchestrator.ts + worker.ts）**：如果计划中存在 `parallelizable: true` 的步骤，`runCodingFlow` 会把整个计划交给 `runOrchestrator()` 而不是串行循环。`groupIntoBatches()` 将**连续的**可并行步骤合并为一个批次，但若某个步骤的 `targetFiles` 与同一串中先前的步骤重叠（或该步骤未声明 targetFiles，无法证明安全），则被降级为独立的串行批次——避免两个 worker 同时写同一个文件。并行的批次通过 `runSubagentsConcurrent`（`allowPartialFailure: true`）派发给 `worker.ts` 子代理；由于 worker 在隔离的消息数组中运行，其结果摘要会作为一条 `user` 消息注入主上下文，随后失败的步骤再走 `runSingleStep()` 串行重试（成功的步骤不会重跑）。每个批次完成后发出 `orchestrator:batch` 事件。**没有任何可并行步骤的计划走完全不变的串行路径。**
 
 **聊天流程**：跳过 Planner/Evaluator，直接用 Generator 管道迭代到模型停止（最多 30 次）。模型返回空时显示回退文本。
 
@@ -425,7 +457,7 @@ Intentor 优先使用快速启发式规则：
 关键设计决策：
 
 - **系统提示稳定性**：系统提示只构建一次，会话期间不更改。最大化 DeepSeek 提示缓存命中率。R1 推理模型的系统提示嵌入在首条用户消息中
-- **管道架构**：借鉴 Harness CI/CD，5 个独立可测试阶段共享 `PipelineContext`
+- **管道架构**：借鉴 Harness CI/CD，4 个独立可测试阶段共享 `PipelineContext`。每个计划步骤的「生成 → 评估 → 修正」循环被提取到 `step-runner.ts`（`runSingleStep()`），串行流程与 Orchestrator 共用同一份实现；聊天/Skill 流程的迭代工具循环则共用 `tool-loop.ts`
 - **EventBus**：所有生命周期事件（管道启动/完成、工具调用、LLM 用量）通过类型化 EventBus 发布
 - **流式优先**：所有 LLM 通信通过 `AsyncIterable<StreamChunk>` 流式传输，实时终端输出
 - **子代理**：`agent_open` 工具委派只读研究任务，限制使用非破坏性工具集
@@ -441,19 +473,21 @@ Intentor 优先使用快速启发式规则：
 
 | 工具 | 描述 | 破坏性？ |
 |---|---|---|
-| `read_file` | 读取文件内容（支持行范围，100KB 限制） | 否 |
-| `write_file` | 写入内容到文件（自动创建目录） | **是** |
-| `edit_file` | 替换文件中的精确字符串 | **是** |
-| `execute_shell` | 运行 shell 命令（带超时，最长 5 分钟） | **是** |
+| `read_file` | 流式读取文件内容（`start_line`/`end_line` 可单独给出；输出上限 2000 行 / 100KB，截断时给出继续所需的 `start_line`） | 否 |
+| `write_file` | 写入内容到文件（按文件串行；覆盖前重新校验确认时的快照） | **是** |
+| `edit_file` | 单次 `old_string`/`new_string` 替换（精确 → CRLF 容忍 → 模糊匹配，拒绝空 `old_string`） | **是** |
+| `execute_shell` | 运行 shell 命令（默认 30s，`timeout_ms` 上限 5 分钟；超时时终止整个进程树） | **是** |
 | `list_directory` | 列出目录树（默认 500 条，最多 2000 条） | 否 |
-| `search_files` | 在文件中搜索文本模式（支持正则和隐藏文件） | 否 |
+| `search_files` | 在文件中搜索文本模式（`is_regex` / `include_hidden` / `ignore_case` / `limit`，命中行截断到 500 字符） | 否 |
 | `memory_write` | 写入持久化记忆条目 | 否 |
 | `memory_read` | 读取持久化记忆条目 | 否 |
-| `web_search` | Web 搜索（Mojeek/SearXNG/DuckDuckGo） | 否 |
+| `web_search` | Web 搜索（Mojeek/SearXNG/DuckDuckGo，引擎实现在 `tools/web-search/engines/`） | 否 |
 | `code_search` | 代码符号搜索（需先运行 `/index`） | 否 |
 | `agent_open` | 委派研究任务给只读子代理 | 否 |
 
-**安全性**：在破坏性操作（write_file、edit_file、execute_shell）之前，执行器会显示 diff 预览并请求用户确认，提供三个选项：是、本次会话全部允许、否。Workspace 级别权限文件（`.codegrunt/permissions.json`）可覆盖每个工具的行为（allow/deny/ask），选择器在 `core/policy/` and `core/tools/tool-executor.ts` 中管理。
+工具通过 `Tool.meta` 声明特征（`readsFiles` / `writesFiles` / `destructive` / `subagentSafe`），注册表提供 `toolHasTrait()` / `toolNamesWithTrait()` 查询——不再有按功能维护的工具名清单；必需参数来自各工具自身的 JSON Schema。共享基础设施位于同目录：`truncate.ts`（行/字节截断，`DEFAULT_MAX_LINES=2000`、`DEFAULT_MAX_BYTES=50*1024`、`MAX_MATCH_LINE_CHARS=500`）、`path-utils.ts`（`resolveToCwd()`）、`file-mutation-queue.ts`（按文件串行化写入/编辑）、`output-accumulator.ts`（有界 shell 输出，溢出写入临时文件）、`edit-diff.ts`（编辑匹配器，与确认预览共用）、`args-repair.ts`（`repairToolArgs()` schema 感知修复）。`Tool.execute(args, ctx?)` 接收可选 `ToolContext`（`signal`、`cwd`）。
+
+**安全性**：在破坏性操作（write_file、edit_file、execute_shell）之前，执行器会显示 diff 预览并请求用户确认，提供三个选项：是、本次会话全部允许、否。Workspace 级别权限文件（`.codegrunt/permissions.json`）可覆盖每个工具的行为（allow/deny/ask）。审批逻辑位于 `core/policy/`（`state.ts` 状态、`gates.ts` 有序门禁：必需参数 → workspace deny → plan 模式、`confirm.ts` 各工具确认策略）与 `core/tools/tool-executor.ts`（`executeToolCall()`）。
 
 ### 管道引擎（src/core/pipeline/）
 
@@ -466,7 +500,7 @@ Intentor 优先使用快速启发式规则：
 | ProcessToolCalls | `process-tools.ts` | 解析工具调用、通过 executor 执行、注入结果 |
 | PostProcess | `post-process.ts` | 盲写警告检测、Token 统计、最终输出格式化、R1 思考内容工具调用回收 |
 
-> `executeToolCall()` 位于 `core/tools/tool-executor.ts`，并不属于某个阶段：实现 `executeToolCall()`（破坏性工具确认流、`/trust` 信任模式、workspace 权限检查、`repairToolArgs()` schema 感知参数修复）。
+> `executeToolCall()` 位于 `core/tools/tool-executor.ts`，并不属于某个阶段：它负责修复参数（`args-repair.ts`）、按顺序执行策略门禁（`core/policy/gates.ts`：必需参数 → workspace deny → plan 模式）、调用该工具的确认策略（`core/policy/confirm.ts`）后执行。信任模式 / yes-for-all / workspace 权限状态在 `core/policy/state.ts` 中。
 
 所有阶段共享一个 `PipelineContext`，由 `PipelineEngine` 按序执行。
 
@@ -502,6 +536,7 @@ DeepSeek 提供商实现包括：
 - **模型降级**：默认降级为 `deepseek-v4-flash`（与 Intentor 分类调用相同策略）；传 `noModelDowngrade: true`（或显式模型）保留调用方配置的模型层级
 - **生命周期**：单次调用 `runSubagent()` 阻塞直至子代理生成最终答案或达到 `MAX_SUBAGENT_ITERATIONS`（10 次）。每个子代理有独立的超时（`DEFAULT_SUBAGENT_TIMEOUT_MS = 120_000`），通过内部 `AbortController` 与调用方 signal 合并实现取消
 - **并发执行（v0.7）**：`runSubagentsConcurrent()` 通过 `Promise.allSettled` 批量运行多个任务，并发上限 `MAX_CONCURRENT_SUBAGENTS`（10）。默认任一任务失败即抛出聚合错误；传 `allowPartialFailure: true` 得到混合成功/失败的结果
+- **可写入的 worker（worker.ts）**：`runWorker()` 等于 `runSubagent()` 只多一项能力——`allowWrite` 在只读默认工具集之上授予 `write_file` / `edit_file`（`getWorkerWriteToolNames()` / `getWriterAllowlist()`）。`execute_shell` 永不授予：并发执行 shell 既可能造成 worker 间的文件系统竞争，也会引发确认对话框的 stdin/stdout 争用。仅由 Orchestrator 用于 Planner 标记为可并行且 `targetFiles` 不重叠的步骤
 - **结果缓存（subagent-cache.ts）**：按 `{task, model, systemOverride, cwd}` 的 sha256 哈希缓存结果（`useCache: true` 时启用），5 分钟 TTL、100 条上限（按最近访问淘汰）。用 `/subagent-cache [clear]` 管理
 
 ### 记忆系统（src/core/memory/）

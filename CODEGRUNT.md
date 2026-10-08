@@ -17,6 +17,10 @@ npm run build
 # Type-check only (no emit)
 npm run typecheck
 
+# Lint (ESLint) and format check (Prettier)
+npm run lint
+npm run format:check
+
 # Full test suite
 npm test
 
@@ -73,6 +77,8 @@ reconciler owns the live region.
 | `useHistory.ts` | Persistent command history with up/down navigation. |
 | `git-branch.ts` | `getCurrentGitBranch(cwd)` — cached current git branch for the StatusBar. |
 | `paste.ts` | Bracketed-paste state machine (multi-line paste no longer misreads as Enter). |
+| `editing.ts` | Pure helpers behind the editing keys (line/word movement, deletions, scroll window, `buildRule`). |
+| `useTerminalSize.ts` | Columns/rows that follow terminal `resize` events. |
 | `types.ts` | Shared Ink component types (`InputResult`, `DropdownItem`, `PromptInputProps`, ...). |
 
 **`at-resolver.ts`** — Parses `@file.ts`, `@src/`, `@"path with spaces"`,
@@ -81,11 +87,19 @@ lists directories up to 20 entries, fetches URLs) and appends formatted
 attachments to the message body. Directory scanning skips `node_modules`,
 `.git`, `dist`, `.next`, `__pycache__`, `.cache`.
 
-**`commands/`** — Slash command handler. Returns discriminated unions:
+**`commands/`** — Slash commands, one file per domain (`help.ts`, `usage.ts`,
+`session.ts`, `memory.ts`, `compact.ts`, `review.ts`, `restore.ts`, `hooks.ts`,
+`preferences.ts`, `connection.ts`, `config-command.ts`, `project.ts`,
+`skills-command.ts`, `mcp.ts`) plus `registry.ts`, which owns the `Command`
+registry and the `BUILTIN_COMMAND_ORDER` display list. A command is
+`{ name, aliases?, desc, run(ctx) }`; `run()` returns a discriminated union —
 `handled`, `clear`, `config_changed`, `model_changed`, `skills_reload`, or
-`not_a_command`. The full command list is in the Slash Commands section below.
-`branch-commands.ts` holds the `/branch`, `/tree`, `/switch`,
-`/subagent-cache` handlers.
+`not_a_command`. `index.ts` registers every domain's commands; a test fails if
+the registry and the display-order list drift apart. Registering a new command
+means adding it to a domain file **and** to that list. The full command list is
+in the Slash Commands section below. `branch-commands.ts` (in `src/cli/`, not
+`commands/`) holds the `/branch`, `/tree`, `/switch`, `/subagent-cache`
+handlers.
 
 **`skills.ts`** — Loads user-defined skills from `.codegrunt/skills/` (project),
 `.claude/skills/` (Claude Code-compatible), and `~/.codegrunt/skills/` (global),
@@ -101,8 +115,17 @@ selection (lists DeepSeek models), token limit, reasoning effort. Writes to
 **`update.ts`** — Checks npm registry for new versions and upgrades the global
 installation via `npm install -g codegrunt@latest`.
 
-**`init.ts`** — `/init` implementation: analyzes the codebase and generates a
-`CODEGRUNT.md` project guide.
+**`init/`** — `/init` implementation, split into `index.ts` (command entry),
+`prompt.ts` (the analysis prompt) and `scan.ts` (codebase scanning):
+analyzes the codebase and generates a `CODEGRUNT.md` project guide.
+
+**`repl/`** — helpers extracted from `repl.ts`: `apply-config.ts`
+(`applyConfig()` + `contextBudgetFor()`), `resume.ts` (`handleResumeCommand()`,
+`resumedMessage()`) and `session-recorder.ts` (`SessionRecorder` — auto-saves
+the conversation and records a branching checkpoint per turn).
+
+**`terminal-compat.ts`** — terminal capability detection/adjustment for
+legacy consoles.
 
 ### Agent Loop (`src/core/agent/`)
 
@@ -111,7 +134,10 @@ powered by a Harness-style pipeline engine. The agent core is split across
 `loop.ts` (entry), `intentor.ts`, `planner.ts`, `generator.ts` (shared
 generator), `evaluator.ts`, `chat-flow.ts`, `coding-flow.ts`, `skill-flow.ts`,
 `complexity.ts` (request classifier / thinking router), `r1-harvester.ts`,
-`subagent.ts` + `subagent-cache.ts`.
+`step-runner.ts` (one plan step: generate → evaluate → refine),
+`tool-loop.ts` (iterative tool loop for the chat/skill flows),
+`orchestrator.ts` + `worker.ts` (parallel step batches), and
+`subagent.ts` + `subagent-runtime.ts` + `subagent-cache.ts`.
 
 **Phase 0 — Intentor** (`intentor.ts`): Classifies user intent into three paths:
 - **Skill match** → `runSkillFlow`: applies skill system prompt + content;
@@ -146,6 +172,18 @@ signals route to pro; never routes to a reasoner model.
    feedback and retries (max `MAX_REFINE_RETRIES = 3`), then prompts the user
    whether to continue. `pruneRefineMessages()` cleans eval feedback between steps
 4. `sessionHasRead` tracking prevents redundant file reads across turns
+5. **Parallel orchestration** (`orchestrator.ts`): if the Planner marked any
+   step `parallelizable`, `runCodingFlow` hands the plan to `runOrchestrator()`
+   instead of the sequential loop. `groupIntoBatches()` merges each run of
+   consecutive parallelizable steps into one batch, demoting a step to its own
+   serial batch when its `targetFiles` overlap an earlier step in the run (or
+   when it declares none), so two workers never race on the same file. A
+   parallel batch is dispatched to `worker.ts` sub-agents through
+   `runSubagentsConcurrent` (`allowPartialFailure: true`); their summaries are
+   pushed back into the main context as a `user` message, and any failed step
+   is retried serially through `runSingleStep()`. Each batch emits an
+   `orchestrator:batch` event. Plans with no parallelizable step take the
+   original sequential path unchanged.
 
 **Chat Flow**: Skips Planner/Evaluator, uses Generator pipeline iteratively
 (up to 30 iterations). Prints fallback text if model returns empty.
@@ -195,6 +233,14 @@ more isolated sub-agents.
   `MAX_CONCURRENT_SUBAGENTS` (10). By default a single failed task throws an
   aggregated error; pass `allowPartialFailure: true` to get a mixed
   success/failure result instead.
+- **Write-capable workers** (`worker.ts`): `runWorker()` is `runSubagent()`
+  with exactly one extra capability — `allowWrite` grants `write_file` /
+  `edit_file` on top of the read-only default (from
+  `getWorkerWriteToolNames()` / `getWriterAllowlist()`). `execute_shell` is
+  never granted: concurrent shell execution risks filesystem races between
+  workers and confirm-dialog stdin/stdout contention. Used only by the
+  Orchestrator, for plan steps the Planner marked parallelizable with
+  non-overlapping `targetFiles`.
 - **Result caching** (`subagent-cache.ts`): caches results by a sha256 hash of
   `{task, model, systemOverride, cwd}` (opt-in via `useCache: true`), 5-minute
   TTL, 100-entry cap (least-accessed eviction). Managed with
@@ -213,10 +259,12 @@ wired in `src/core/agent/generator.ts`, sharing a `PipelineContext`
 | ProcessToolCalls | `process-tools.ts` | Parse tool calls, execute via `executeToolCall()`, inject results |
 | PostProcess | `post-process.ts` | Blind-write warnings, token stats, final output; runs R1 thought harvesting |
 
-`core/tools/tool-executor.ts` (`executeToolCall`) is **not a stage** — it implements
-`executeToolCall()` (confirm flow, `repairToolArgs()` schema-aware JSON repair,
-trust-mode state, workspace permission checks, `setTrustMode()` /
-`setWorkspacePermissions()`).
+`core/tools/tool-executor.ts` (`executeToolCall`) is **not a stage** — it repairs
+arguments (`args-repair.ts`), runs the ordered policy gates
+(`core/policy/gates.ts`: required params → workspace deny → plan mode), asks the
+tool's confirm strategy (`core/policy/confirm.ts`) and executes. Trust-mode /
+yes-for-all / workspace-permission state lives in `core/policy/state.ts`
+(`setTrustMode()`, `setWorkspacePermissions()`).
 
 ### Tool System (`src/core/tools/`)
 
@@ -224,12 +272,12 @@ Eleven built-in tools, registered in `src/core/tools/registry.ts`:
 
 | Tool | File | Destructive? | Notes |
 |---|---|---|---|
-| `read_file` | `read-file.ts` | No | Optional `start_line`/`end_line` range reading; 100 KB limit; files >100 KB show line count + instructions |
-| `write_file` | `write-file.ts` | **Yes** — diff preview + confirm | |
-| `edit_file` | `edit-file.ts` | **Yes** — diff preview + confirm | CRLF-tolerant matching (`utils/line-endings.ts`), ambiguity guard |
-| `execute_shell` | `execute-shell.ts` | **Yes** — confirm | `timeout_ms` capped at 300 s (5 min); reports captured bytes on timeout |
-| `list_directory` | `list-directory.ts` | No | Default 500 entries; `max_entries` param up to 2000 |
-| `search_files` | `search-files.ts` | No | `is_regex: boolean` and `include_hidden: boolean` params |
+| `read_file` | `read-file.ts` | No | Streams (never loads the whole file); `start_line`/`end_line` (either alone); output capped at 2000 lines / 100 KB and ends with the exact `start_line` to continue from |
+| `write_file` | `write-file.ts` | **Yes** — diff preview + confirm | Serialized per file; re-checks the confirm-time snapshot before overwriting |
+| `edit_file` | `edit-file.ts` | **Yes** — diff preview + confirm | Single `old_string`/`new_string` replacement; exact → CRLF/LF-tolerant → fuzzy matching (`edit-diff.ts`), ambiguity guard, empty `old_string` rejected |
+| `execute_shell` | `execute-shell.ts` | **Yes** — confirm | `timeout_ms` default 30 s, capped at 300 s (5 min); keeps the last 2000 lines / 50 KB, spilling the full output to a temp file; timeout / Ctrl+C kills the whole process tree |
+| `list_directory` | `list-directory.ts` | No | Nested tree (directories first), `depth`, `max_entries` (default 500, max 2000); missing path is an error |
+| `search_files` | `search-files.ts` | No | `is_regex`, `include_hidden`, `ignore_case`, `limit` (default 50, max 500); matching lines cut at 500 chars |
 | `memory_write` | `memory.ts` | No | Writes to the agent's persistent memory store |
 | `memory_read` | `memory.ts` | No | Reads from the agent's persistent memory store |
 | `web_search` | `web-search.ts` | No | Mojeek (default) / SearXNG / DuckDuckGo |
@@ -240,6 +288,26 @@ Eleven built-in tools, registered in `src/core/tools/registry.ts`:
 mapped to implementations. This is what gets sent to the LLM as available
 functions. External callers use `getToolDefinitions()` and `getToolByName()`
 only; `getToolRegistry()` is available for MCP tool injection.
+
+**Tool traits** (`Tool.meta`) — a tool declares `readsFiles` / `writesFiles` /
+`destructive` / `subagentSafe` on itself instead of features keeping
+per-tool-name lists; the registry answers trait queries via
+`toolHasTrait()` / `toolNamesWithTrait()`. Required parameters come from each
+tool's own JSON Schema.
+
+**Shared tool infrastructure** — `truncate.ts` (head/tail truncation by line +
+byte limit; `DEFAULT_MAX_LINES = 2000`, `DEFAULT_MAX_BYTES = 50 * 1024`,
+`MAX_MATCH_LINE_CHARS = 500`), `path-utils.ts` (`resolveToCwd()`: `~`
+expansion, leading `@` stripped, unicode spaces), `file-mutation-queue.ts`
+(per-file serialization of write/edit), `output-accumulator.ts` (bounded shell
+output, spills to a temp file), `edit-diff.ts` (the shared edit matcher used by
+both `edit_file` and the confirmation preview), `args-repair.ts`
+(`repairToolArgs()` — schema-aware JSON repair), `tool-executor.ts`
+(`executeToolCall()`).
+
+`Tool.execute(args, ctx?)` takes an optional `ToolContext` (`signal`, `cwd`)
+that `executeToolCall()` fills from the turn's abort signal and working
+directory.
 
 **Safety**: destructive tools are gated behind the confirm-dialog / trust-mode /
 workspace-permission logic in `core/policy/` and `core/tools/tool-executor.ts` (`executeToolCall`).
@@ -301,7 +369,7 @@ accumulation, reasoning content extraction, token usage tracking via
 
 **EventBus** (`src/core/events/bus.ts`): typed events — `pipeline:started`,
 `pipeline:finished`, `stage:started`, `stage:finished`, `tool:called`,
-`tool:result`, `llm:request`, `llm:usage`, `error`.
+`tool:result`, `llm:request`, `llm:usage`, `error`, `orchestrator:batch`.
 
 **Usage tracking** (`src/core/usage.ts`): shared session/per-call token usage
 (`addUsage`, `getSessionUsage`, `getLastCallUsage`); extracted from `loop.ts`
@@ -487,6 +555,7 @@ All commands below are implemented in `src/cli/commands/` (with
 | `/sessions [delete <id>]` | List and manage saved sessions |
 | `/memory [delete <id>]` | Show persistent memory entries and last session summary |
 | `/hooks` | List loaded hook scripts from `~/.codegrunt/hooks/` |
+| `/skills` | List and manage skills (create, list, install) |
 | `/trust [plan\|code\|auto]` | Set trust mode: plan (read-only) / code (confirm) / auto (yes-all) |
 | `/restore [hash]` | List and restore a working-tree snapshot |
 | `/baseurl [url\|reset]` | Set a custom DeepSeek API base URL |
