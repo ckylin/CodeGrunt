@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { selectFromList } from '../../src/utils/select.js';
-import { registerPickerHandler, unregisterPickerHandler } from '../../src/cli/ink/output-channel.js';
-import type { PickerHandler } from '../../src/cli/ink/output-channel.js';
+import { registerPickerHandler, unregisterPickerHandler } from '../../src/core/output/output-channel.js';
+import type { PickerHandler } from '../../src/core/output/output-channel.js';
 
 // This exists specifically to cover a real bug caught during the App.tsx
 // integration: Ink keys its render() instances by the stdout stream (see

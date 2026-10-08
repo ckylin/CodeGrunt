@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { mkdir, rm } from 'fs/promises';
 import { join } from 'path';
 import { tmpdir } from 'os';
-import { executeShellTool } from '../../src/core/tools/execute_shell.js';
+import { executeShellTool } from '../../src/core/tools/execute-shell.js';
 
 describe('execute_shell', () => {
   let dir: string;

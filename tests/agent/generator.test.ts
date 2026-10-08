@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { UIStreamEmitter } from '../../src/core/agent/generator.js';
-import { registerSink, unregisterSink } from '../../src/cli/ink/output-channel.js';
-import type { OutputChannelSink, LiveToolInfo } from '../../src/cli/ink/output-channel.js';
+import { registerSink, unregisterSink } from '../../src/core/output/output-channel.js';
+import type { OutputChannelSink, LiveToolInfo } from '../../src/core/output/output-channel.js';
 
 function stripAnsi(s: string): string {
   // eslint-disable-next-line no-control-regex
@@ -55,10 +55,12 @@ describe('UIStreamEmitter — sink mode (persistent App mounted)', () => {
   beforeEach(() => {
     sink = makeMockSink();
     registerSink(sink);
+    vi.useFakeTimers();
   });
 
   afterEach(() => {
     unregisterSink();
+    vi.useRealTimers();
   });
 
   it('routes text deltas to the sink live-text buffer instead of stdout', () => {
@@ -75,6 +77,7 @@ describe('UIStreamEmitter — sink mode (persistent App mounted)', () => {
     emitter.onTextDelta('Hello');
     emitter.onTextDelta(', world');
     emitter.onTextDelta('!');
+    vi.advanceTimersByTime(50); // flush output-channel's render throttle
     const last = sink.liveText[sink.liveText.length - 1];
     expect(stripAnsi(last)).toBe('Hello, world!');
   });
@@ -82,6 +85,7 @@ describe('UIStreamEmitter — sink mode (persistent App mounted)', () => {
   it('renders a code block once its closing fence arrives, even split across deltas', () => {
     const emitter = new UIStreamEmitter(0);
     emitter.onTextDelta('```js\nconst x = 1;\n```\n');
+    vi.advanceTimersByTime(50);
     const last = sink.liveText[sink.liveText.length - 1];
     expect(stripAnsi(last)).toContain('╭');
     expect(stripAnsi(last)).toContain('const x = 1;');
@@ -90,6 +94,7 @@ describe('UIStreamEmitter — sink mode (persistent App mounted)', () => {
   it('shows no live preview for a code block that has not yet closed (MarkdownRenderer buffers until the closing fence, in both sink and fallback mode)', () => {
     const emitter = new UIStreamEmitter(0);
     emitter.onTextDelta('```js\nconst x = 1;\n');
+    vi.advanceTimersByTime(50);
     const last = sink.liveText[sink.liveText.length - 1];
     expect(stripAnsi(last)).toBe('');
   });

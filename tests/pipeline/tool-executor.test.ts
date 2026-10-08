@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { executeToolCall } from '../../src/core/pipeline/stages/process-tools-helpers.js';
+import { executeToolCall } from '../../src/core/tools/tool-executor.js';
 import { getToolRegistry } from '../../src/core/tools/registry.js';
 import type { Tool } from '../../src/types.js';
 

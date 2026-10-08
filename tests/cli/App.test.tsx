@@ -3,7 +3,7 @@ import { render } from 'ink-testing-library';
 import { mountApp } from '../../src/cli/ink/App.js';
 import {
   write, appendLiveText, commitLiveText, setLiveTool, hasSink, getPickerHandler,
-} from '../../src/cli/ink/output-channel.js';
+} from '../../src/core/output/output-channel.js';
 
 function stripAnsi(s: string): string {
   // eslint-disable-next-line no-control-regex

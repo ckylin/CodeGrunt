@@ -2,17 +2,17 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import {
   registerSink, unregisterSink, hasSink,
   write, appendLiveText, setLiveTextDirect, commitLiveText, discardLiveText, setLiveTool,
-} from '../../src/cli/ink/output-channel.js';
-import type { OutputChannelSink } from '../../src/cli/ink/output-channel.js';
+} from '../../src/core/output/output-channel.js';
+import type { OutputChannelSink } from '../../src/core/output/output-channel.js';
 
 function makeMockSink(): OutputChannelSink & {
   lines: string[];
   liveText: string[];
-  liveTool: (import('../../src/cli/ink/output-channel.js').LiveToolInfo | null)[];
+  liveTool: (import('../../src/core/output/output-channel.js').LiveToolInfo | null)[];
 } {
   const lines: string[] = [];
   const liveText: string[] = [];
-  const liveTool: (import('../../src/cli/ink/output-channel.js').LiveToolInfo | null)[] = [];
+  const liveTool: (import('../../src/core/output/output-channel.js').LiveToolInfo | null)[] = [];
   return {
     lines,
     liveText,
@@ -64,10 +64,12 @@ describe('output-channel fallback mode (no sink registered)', () => {
 describe('output-channel sink mode (registered sink)', () => {
   beforeEach(() => {
     unregisterSink();
+    vi.useFakeTimers();
   });
 
   afterEach(() => {
     unregisterSink();
+    vi.useRealTimers();
   });
 
   it('hasSink() is true once a sink is registered', () => {
@@ -91,13 +93,28 @@ describe('output-channel sink mode (registered sink)', () => {
     writeSpy.mockRestore();
   });
 
-  it('appendLiveText() accumulates deltas and pushes the FULL buffer each time, not just the delta', () => {
+  it('appendLiveText() renders the first delta immediately, then throttles bursts to a single trailing render with the FULL buffer', () => {
     const sink = makeMockSink();
     registerSink(sink);
     appendLiveText('Hello');
+    // First call always renders immediately (no prior render to throttle against).
+    expect(sink.liveText).toEqual(['Hello']);
     appendLiveText(', world');
     appendLiveText('!');
-    expect(sink.liveText).toEqual(['Hello', 'Hello, world', 'Hello, world!']);
+    // Still within the throttle window — no additional renders queued yet.
+    expect(sink.liveText).toEqual(['Hello']);
+    vi.advanceTimersByTime(50);
+    // Trailing render fires once, with the fully-accumulated buffer.
+    expect(sink.liveText).toEqual(['Hello', 'Hello, world!']);
+  });
+
+  it('appendLiveText() renders immediately again once the throttle window has elapsed', () => {
+    const sink = makeMockSink();
+    registerSink(sink);
+    appendLiveText('a');
+    vi.advanceTimersByTime(50);
+    appendLiveText('b');
+    expect(sink.liveText).toEqual(['a', 'ab']);
   });
 
   it('commitLiveText() writes the accumulated buffer as a permanent line and clears live text', () => {
@@ -106,6 +123,16 @@ describe('output-channel sink mode (registered sink)', () => {
     appendLiveText('streamed response');
     commitLiveText();
     expect(sink.lines).toEqual(['streamed response']);
+    expect(sink.liveText[sink.liveText.length - 1]).toBe('');
+  });
+
+  it('commitLiveText() cancels a pending throttled render so it cannot repopulate live text after clearing', () => {
+    const sink = makeMockSink();
+    registerSink(sink);
+    appendLiveText('a');       // renders immediately
+    appendLiveText('b');       // schedules a trailing render for 'ab'
+    commitLiveText();          // should cancel that pending render
+    vi.advanceTimersByTime(50);
     expect(sink.liveText[sink.liveText.length - 1]).toBe('');
   });
 
@@ -139,6 +166,7 @@ describe('output-channel sink mode (registered sink)', () => {
     const sink = makeMockSink();
     registerSink(sink);
     setLiveTextDirect('rendered block v1');
+    vi.advanceTimersByTime(50); // clear the throttle window between the two calls
     setLiveTextDirect('rendered block v1 and v2');
     expect(sink.liveText).toEqual(['rendered block v1', 'rendered block v1 and v2']);
   });

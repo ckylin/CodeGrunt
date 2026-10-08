@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { printToolOutputPreview, createToolSpinner } from '../../src/utils/tool-spinner.js';
-import { registerSink, unregisterSink } from '../../src/cli/ink/output-channel.js';
-import type { OutputChannelSink, LiveToolInfo } from '../../src/cli/ink/output-channel.js';
+import { registerSink, unregisterSink } from '../../src/core/output/output-channel.js';
+import type { OutputChannelSink, LiveToolInfo } from '../../src/core/output/output-channel.js';
 
 function makeMockSink(): OutputChannelSink & { lines: string[]; liveTool: (LiveToolInfo | null)[] } {
   const lines: string[] = [];

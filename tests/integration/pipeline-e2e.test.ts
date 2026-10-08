@@ -20,7 +20,7 @@ import { PrepareContextStage, pushUserMessage } from '../../src/core/pipeline/st
 import { StreamResponseStage } from '../../src/core/pipeline/stages/stream-response.js';
 import { ProcessToolCallsStage } from '../../src/core/pipeline/stages/process-tools.js';
 import { PostProcessStage } from '../../src/core/pipeline/stages/post-process.js';
-import { setTrustMode, resetYesAll } from '../../src/core/pipeline/stages/process-tools-helpers.js';
+import { setTrustMode, resetYesAll } from '../../src/core/policy/state.js';
 import { createScriptedProvider } from '../helpers/mock-provider.js';
 import type { PipelineContext } from '../../src/core/pipeline/types.js';
 import type { CodeGruntConfig } from '../../src/types.js';

@@ -13,7 +13,7 @@ import { buildSemanticIndex, serializeSemanticIndex } from '../../src/core/index
 // through buildIndex() (which shells out to git/grep and writes to
 // ~/.codegrunt/index) — this keeps the tests fast, deterministic, and free
 // of filesystem/shell dependencies while still covering the real code path
-// that code_search.ts calls into.
+// that code-search.ts calls into.
 
 function sym(name: string, file: string, kind: CodeSymbol['kind'] = 'function', line = 1): CodeSymbol {
   return { name, kind, file, line };

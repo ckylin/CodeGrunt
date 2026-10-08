@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { writeFile, mkdir, rm } from 'fs/promises';
 import { join } from 'path';
 import { tmpdir } from 'os';
-import { readFileTool } from '../../src/core/tools/read_file.js';
+import { readFileTool } from '../../src/core/tools/read-file.js';
 
 describe('read_file', () => {
   let dir: string;
