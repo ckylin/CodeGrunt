@@ -254,7 +254,7 @@ npm test           # run vitest test suite
 npm start          # run compiled dist/cli/index.js
 
 # Run a single test file
-npx vitest run tests/tools/read_file.test.ts
+npx vitest run tests/tools/read-file.test.ts
 ```
 
 For project structure details, architecture design, agent loop documentation, and more, see:

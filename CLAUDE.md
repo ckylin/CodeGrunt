@@ -7,26 +7,30 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ```bash
 npm run dev        # dev mode with watch (tsx)
 npm run build      # compile TypeScript to dist/
-npm run typecheck  # type check only, no emit
+npm run typecheck  # type check only, no emit (noUnusedLocals is on)
+npm run lint       # eslint (src + tests)
 npm test           # run vitest test suite
 npm start          # run compiled dist/cli/index.js
 
 # Run a single test file
-npx vitest run tests/tools/read_file.test.ts
+npx vitest run tests/tools/read-file.test.ts
 ```
 
 ## Architecture
 
 CodeGrunt is a terminal-native agentic coding assistant using a **P/G/E (Planner / Generator / Evaluator) + Intentor** architecture powered by a Harness-style pipeline engine.
 
-- `src/cli/` — entry point, REPL loop, argument parsing, slash commands (`commands.ts`), branch commands (`branch-commands.ts`), skills, @-reference resolver, **Ink/React terminal UI** (persistent `App.tsx` tree + `PromptInput`, `StatusBar`, `output-channel` sink, etc.)
-- `src/core/agent/` — Intentor (intent + skill classification), Planner (task decomposition), Generator (`generator.ts` — shared 4-stage pipeline runner), Evaluator (quality check + auto-refine), complexity router (`complexity.ts` — request classifier + thinking-mode router), Subagent (`subagent.ts` — isolated sub-task execution, sync + concurrent; `subagent-cache.ts` — result cache by input hash), R1 Thought Harvester (`r1-harvester.ts` — recovers tool calls escaped into `reasoning_content`)
-- `src/core/pipeline/` — Harness-style pipeline engine (4 stages: prepare context → stream response → process tools → post-process) sharing a `PipelineContext`; `stages/process-tools-helpers.ts` is a **helper module** (tool execution, confirm flow, trust mode, permissions), not a stage
+- `src/cli/` — entry point, REPL loop, argument parsing, slash commands (`commands/` — a Command registry, see below), branch commands (`branch-commands.ts`), skills, @-reference resolver, **Ink/React terminal UI** (persistent `App.tsx` tree + `PromptInput`, `StatusBar`, `output-channel` sink, etc.)
+- `src/core/agent/` — Intentor (intent + skill classification), Planner (task decomposition), Generator (`generator.ts` — shared 4-stage pipeline runner), Evaluator (quality check + auto-refine), complexity router (`complexity.ts` — request classifier + thinking-mode router), Subagent (`subagent.ts` — isolated sub-task execution, sync + concurrent; `subagent-runtime.ts` — its types, per-turn context and the runner seam `agent_open` calls through; `subagent-cache.ts` — result cache by input hash), `step-runner.ts` (one plan step: generate → evaluate → refine, shared by the coding flow and the orchestrator), `tool-loop.ts` (the iterative tool loop shared by the chat and skill flows), R1 Thought Harvester (`r1-harvester.ts` — recovers tool calls escaped into `reasoning_content`)
+- `src/core/pipeline/` — Harness-style pipeline engine (4 stages: prepare context → stream response → process tools → post-process) sharing a `PipelineContext`. Tool execution is split out of the stages: `core/tools/tool-executor.ts` (`executeToolCall`), `core/tools/args-repair.ts` (JSON/schema repair), and `core/policy/` (`state.ts` trust mode + yes-for-all + workspace permissions, `gates.ts` required-params → workspace deny → plan mode, `confirm.ts` per-tool confirm strategies)
 - `src/core/tools/` — 11 built-in tools: file read/write/edit, shell execution, directory listing, search, memory read/write (`memory.ts`), web search, code search, `agent_open` (sub-agent delegation). `ToolRegistry` manages registration internally
-  - `read_file`: supports `start_line`/`end_line` params; 100KB limit (files >100KB return line count with instructions to use line range)
-  - `execute_shell`: `timeout_ms` capped at 300s (5 min); reports captured bytes on timeout
-  - `search_files`: `is_regex` (boolean) and `include_hidden` (boolean) params
-  - `list_directory`: default limit 500 entries, `max_entries` param up to 2000
+  - Shared infrastructure (ported from the `pi` project): `truncate.ts` (head/tail truncation by line + byte limit, never splits a line), `path-utils.ts` (`resolveToCwd`: `~` expansion, leading `@` stripped, unicode spaces), `file-mutation-queue.ts` (per-file serialization of write/edit), `output-accumulator.ts` (bounded shell output, spills to a temp file), `edit-diff.ts` (shared edit matcher). `Tool.execute(args, ctx?)` takes an optional `ToolContext` (`signal`, `cwd`) that `executeToolCall` fills from the turn's abort signal and cwd
+  - `read_file`: `start_line`/`end_line` (either may be given alone); streams, so large files are never loaded whole. Output is capped at 2000 lines / 100KB and ends with the exact `start_line` to continue from
+  - `write_file`: serialized per file; still re-checks the confirm-time snapshot (`_originalContent`) before overwriting
+  - `edit_file`: single `old_string`/`new_string` replacement. Matching order is exact, then CRLF/LF-tolerant, then fuzzy (trailing whitespace, smart quotes, unicode dashes/spaces; reported in the result). `applyEdit()` in `confirm.ts` uses the same matcher so the diff shown for confirmation is what gets written. Empty `old_string` is rejected
+  - `execute_shell`: `timeout_ms` capped at 300s (5 min). Output keeps the last 2000 lines / 50KB; when cut, the full output is saved to a temp file and its path is reported. Timeout and Ctrl+C/Esc kill the whole process tree (`taskkill /T` on Windows, process group elsewhere)
+  - `search_files`: `is_regex`, `include_hidden`, `ignore_case`, `limit` (default 50, max 500); matching lines are cut at 500 chars
+  - `list_directory`: nested tree (directories first, case-insensitive), `depth`, `max_entries` (default 500, max 2000); missing path is an error, not "empty directory"
   - `agent_open`: delegates a focused research question to an isolated sub-agent (see Subagent section below)
 - `src/core/context/` — append-only, cache-first context window management (token budget, soft-trim-from-end on emergency overflow only) and project guide loading
 - `src/core/session/` — session persistence (`store.ts` — JSONL at `~/.codegrunt/conv-sessions/`) and session branching (`branching.ts` — fork/switch/tree over per-turn checkpoints)
@@ -74,13 +78,28 @@ CodeGrunt is a terminal-native agentic coding assistant using a **P/G/E (Planner
 
 `agent_open` lets the main agent delegate a focused research question to one or more isolated sub-agents. A single call via `runSubagent()` blocks until that sub-agent produces a final text answer or hits `MAX_SUBAGENT_ITERATIONS` (10).
 
-- **Read-only tool set**: `SUBAGENT_TOOL_NAMES` restricts sub-agents to `read_file`, `search_files`, `list_directory`, `code_search`, `web_search`, `memory_read`. No `write_file`/`edit_file`/`execute_shell` — this sidesteps the confirm-dialog stdin/stdout contention that concurrent sub-agents running destructive tools would create, and means sub-agent tool calls never go through `confirmOrSkip`.
+- **Read-only tool set**: `getSubagentToolNames()` returns every tool declaring `meta.subagentSafe` (`read_file`, `search_files`, `list_directory`, `code_search`, `web_search`, `memory_read`). No `write_file`/`edit_file`/`execute_shell` — this sidesteps the confirm-dialog stdin/stdout contention that concurrent sub-agents running destructive tools would create, and means sub-agent tool calls never go through `confirmOrSkip`.
 - **Isolated context**: sub-agents get a fresh `Message[]` array (system + user only) — they never see the calling agent's conversation history.
 - **Model tier**: downgraded to `deepseek-v4-flash` for DeepSeek models by default (same policy as Intentor classification calls); pass `noModelDowngrade: true` to keep the caller's configured model tier.
-- **Wiring**: `setSubagentContext(provider, model)` is called once per turn in `runAgentLoop` (and again after model auto-routing) so the `agent_open` tool — which only receives `args: Record<string, unknown>`, not the provider — can reach the LLM. Mirrors the `setTrustMode()` module-level-state pattern in `process-tools-helpers.ts`.
+- **Wiring**: `setSubagentContext(provider, model)` is called once per turn in `runAgentLoop` (and again after model auto-routing) so the `agent_open` tool — which only receives `args: Record<string, unknown>`, not the provider — can reach the LLM. Mirrors the `setTrustMode()` module-level-state pattern in `core/policy/state.ts`.
 - **Concurrent execution (v0.7)**: `runSubagentsConcurrent()` runs multiple `SubagentRunOptions` tasks in batches via `Promise.allSettled`, capped at `MAX_CONCURRENT_SUBAGENTS` (10) regardless of the requested `concurrency` value. By default a single failed task throws with an aggregated error message; pass `allowPartialFailure: true` to get a mixed success/failure `ConcurrentSubagentResult` instead.
 - **Lifecycle management**: each sub-agent has a per-call timeout (`timeoutMs`, default 120s) enforced via an internal `AbortController`; `combineAbortSignals()` merges that timeout signal with any caller-supplied `signal` so external cancellation (e.g. Ctrl+C) and timeout share one abort path.
 - **Result caching**: `src/core/agent/subagent-cache.ts` caches results by a sha256 hash of `{task, model, systemOverride, cwd}` (opt-in via `useCache: true`), with a 5-minute TTL and a 100-entry cap (least-accessed entry evicted first). Managed with `/subagent-cache [clear]`.
+
+## Code organization
+
+Dependencies point one way: `src/cli` → `src/core` → `src/providers`/`src/utils`. `src/core` never imports from `src/cli` (output goes through `core/output/output-channel.ts`), and `madge --circular` reports no cycles — keep it that way.
+
+Patterns used, and where to extend them:
+
+- **Command registry** (`src/cli/commands/`): a slash command is `{ name, aliases?, desc, run(ctx) }`; add one by registering it in a domain file and adding its name to the display-order list in `index.ts` (a test fails if the two drift). `/resume` is listed but handled by `repl.ts`.
+- **Tool traits** (`Tool.meta`): declare `readsFiles` / `writesFiles` / `destructive` / `subagentSafe` on the tool instead of adding names to lists. Required parameters come from the tool's own schema.
+- **Confirm strategies** (`core/policy/confirm.ts`): a destructive tool gets a prompt by registering a strategy under its name. Gates run in order: required params → workspace deny → plan mode.
+- **Search engines** (`core/tools/web-search/engines/`): implement `SearchEngine` and add it to the engine map.
+- **Model policy** (`providers/model-policy.ts`): all "is this a DeepSeek / reasoner / which cheap model" decisions live here.
+- **Directory-skip presets** (`utils/fs-ignore.ts`): the presets differ on purpose; pick the one matching the walker.
+
+Characterization tests pin current behavior, quirks included (see `KNOWN QUIRK` in `tests/agent/`); fix a quirk in its own change, not while refactoring.
 
 ## Provider System
 
@@ -106,11 +125,11 @@ Inspired by Harness CI/CD, each agent interaction is decomposed into **4 stages*
 | ProcessToolCalls | Parse tool calls, execute via executor, inject results |
 | PostProcess | Blind-write warnings, token stats, final output |
 
-`stages/process-tools-helpers.ts` is **not a stage** — it's a helper module implementing `executeToolCall()` (confirm flow, trust mode, workspace permissions, `repairToolArgs()` schema-aware JSON repair).
+`executeToolCall()` lives in `core/tools/tool-executor.ts`, not in a stage: it repairs arguments (`args-repair.ts`), runs the policy gates (`core/policy/gates.ts`), asks the tool's confirm strategy (`core/policy/confirm.ts`) and executes. Tools declare traits in `Tool.meta` (`readsFiles`, `writesFiles`, `destructive`, `subagentSafe`); the registry answers trait queries (`toolHasTrait`, `toolNamesWithTrait`), so there are no per-feature tool-name lists. Required parameters come from each tool's own schema.
 
 ## Tool Confirmation Flow
 
-Destructive tools (`write_file`, `edit_file`, `execute_shell`) are handled in `src/core/pipeline/process-tools-helpers.ts`, which calls `confirmEdit()` in `src/utils/confirm.ts` to show a diff and prompt the user. Choosing "Yes for all" sets a session-level flag. On user rejection, the assistant message `tool_calls` array is trimmed to only the processed calls. `resetYesAll()` is called at the start of each new user turn.
+Destructive tools (`write_file`, `edit_file`, `execute_shell`) are handled by the confirm strategies in `src/core/policy/confirm.ts` (registered per tool name), which call `confirmEdit()` / `confirmShellCommand()` in `src/utils/confirm.ts` to show a diff and prompt the user. Choosing "Yes for all" sets a session-level flag. On user rejection, the assistant message `tool_calls` array is trimmed to only the processed calls. `resetYesAll()` is called at the start of each new user turn.
 
 ## Skills System
 
@@ -119,13 +138,15 @@ Skills are Markdown files with YAML frontmatter (`name`, `description`, `system`
 ## UI / Input
 
 **Ink/React components** (`src/cli/ink/`): a persistent React tree (`App.tsx`) owns the terminal for the whole REPL session — `<Static>` history, live tool line, streaming text, `<StatusBar>` (`model · ⎇ branch · Nk tokens`; `{elapsed}s · Esc to cancel` while busy), plus `<PromptInput>`/`<ListPicker>`. Supporting modules:
-- `output-channel.ts` — output routing seam: no sink (one-shot) → straight to `process.stdout`; sink registered (REPL) → routed into Ink state (`write`, `appendLiveText`, `setLiveTextDirect`, `commitLiveText`, `discardLiveText`, `setLiveTool`) + a picker registry so `select.ts` pickers render inside the App tree
-- `PromptInput.tsx` — main input with cursor, history navigation, autocomplete dropdown, busy mode, Ctrl+C double-press cancel, bracketed paste
-- `Dropdown.tsx` — autocomplete overlay; `ListPicker.tsx` — arrow-key selector for model/config selection
+- `src/core/output/output-channel.ts` (lives in core so the agent never imports from `cli/`) — output routing seam: no sink (one-shot) → straight to `process.stdout`; sink registered (REPL) → routed into Ink state (`write`, `appendLiveText`, `setLiveTextDirect`, `commitLiveText`, `discardLiveText`, `setLiveTool`) + a picker registry so `select.ts` pickers render inside the App tree
+- `PromptInput.tsx` — main input, framed by two full-width `─` rules instead of a `> ` prompt (rule color = state: accent idle, purple in a skill, grey while busy; an active skill name and `↑ N more` / `↓ N more` scroll counts sit inside the rules; visible height is capped at ~30% of the terminal). Cursor, history navigation, autocomplete dropdown, busy mode, Ctrl+C double-press cancel, bracketed paste. Editing keys: Ctrl+J newline (plus backslash-continuation), Ctrl+A/E line start/end, Ctrl+W / Alt+Backspace delete word, Ctrl+U / Ctrl+K delete to line start/end, Alt/Ctrl+←/→ and Alt+b/f word jumps. ↑/↓ move between lines of a multi-line entry first and only recall history from the first/last line
+- `editing.ts` — pure helpers behind those keys (line/word movement, deletions, scroll window, `buildRule`); `useTerminalSize.ts` — columns/rows that follow `resize`
+- `Dropdown.tsx` — autocomplete overlay with an aligned description column; ↑/↓ wrap around. `ListPicker.tsx` — arrow-key selector for model/config selection
+- `StatusBar` renders as a footer below the input
 - `useAutocomplete.ts` — file/slash/skill completion; `useHistory.ts` — persistent command history
 - `git-branch.ts` — cached current git branch; `paste.ts` — bracketed-paste state machine
 
-**Legacy input** (`src/cli/input.ts`): Raw-mode terminal input with bottom border + hint line. The accent color throughout is `#4A90D9` (dark theme) / `#1D5D96` (light theme) — see `src/utils/constants.ts` (`ACCENT`, `applyTheme`, `muted`). Both the inline dropdown and `selectFromList` use `❯` as the selected-item indicator. `/theme` switches between `dark` (default) and `light`.
+**Theme**: The accent color throughout is `#4A90D9` (dark theme) / `#1D5D96` (light theme) — see `src/utils/constants.ts` (`ACCENT`, `applyTheme`, `muted`). Both the inline dropdown and `selectFromList` use `❯` as the selected-item indicator. `/theme` switches between `dark` (default) and `light`.
 
 ## Logger v2 (`src/core/observability/logger.ts`)
 
@@ -165,7 +186,7 @@ Config file is created on first run via the setup wizard (`src/cli/setup.ts`). E
 
 Shipped in v0.1.3 — see `Docs/development-guide.md` roadmap for full context. Summary:
 
-- **`src/core/permissions/index.ts`** — per-workspace, tool-level `allow`/`deny`/`ask` overrides loaded from `.codegrunt/permissions.json`. `deny` takes precedence over everything (including plan/auto trust mode); `ask` always forces a confirm prompt even during session-level yes-for-all. Wired into `process-tools-helpers.ts` via `setWorkspacePermissions()`/`getToolPermission()`. Managed with `/permissions [set <tool> <action> | reset <tool>]`.
+- **`src/core/permissions/index.ts`** — per-workspace, tool-level `allow`/`deny`/`ask` overrides loaded from `.codegrunt/permissions.json`. `deny` takes precedence over everything (including plan/auto trust mode); `ask` always forces a confirm prompt even during session-level yes-for-all. Wired in through `core/policy/state.ts` (`setWorkspacePermissions()`) and `getToolPermission()` in `tool-executor.ts`. Managed with `/permissions [set <tool> <action> | reset <tool>]`.
 - **`src/core/swebench/export.ts`** — `/swebench <instance-id>` exports `git diff HEAD` (staged + unstaged) as a SWE-bench-format JSONL line (`{instance_id, model_patch, model_name_or_path}`), appended to `swebench_predictions.jsonl`. Does not reuse the Side-git snapshot repo — that one tracks per-turn commits on a separate branch, not a single cumulative diff.
 - **Skills `mode: subagent`** (`src/cli/skills.ts`) — a skill can set `mode: subagent` in frontmatter to route through the isolated read-only `runSubagent()` loop instead of the main chat loop (no shared history, no write/edit/shell tools). Project skills are now also read from `.claude/skills/` (Claude Code compatible), with priority `.codegrunt/skills/` > `.claude/skills/` > `~/.codegrunt/skills/`.
 - **Evaluator v2** — diagnostics logic extracted from `evaluator.ts` into `src/core/lsp/checker.ts` (`runDiagnostics()`/`formatDiagnostics()`), now covering TypeScript/Python/Go/Rust **and ESLint** (new). Evaluation itself remains pure structural checks (no LLM call) — see rationale comment at the top of `evaluator.ts`.
@@ -175,10 +196,10 @@ Shipped in v0.1.3 — see `Docs/development-guide.md` roadmap for full context. 
 Roadmap target: 缓存极致 + 成本透明 (see `docs/development-guide.md`). Summary:
 
 - **Append-only `ContextManager`** (`src/core/context/manager.ts`) — `checkCapacity()` no longer proactively splices messages to stay under budget; it only sets `needsCompact`/`nearCapacity` flags. Emergency trimming (`softTrimFromEnd()`) fires only once token count exceeds `budget × 2.0`, and trims from the **end** of the message list, never the prefix — this protects the DeepSeek prompt cache. Routine compaction runs via `/compact` or auto-compact wired into `loop.ts` (`compact.ts` hierarchical chunk summarization on the flash model).
-- **`/cache` command** (`src/cli/commands.ts`) — `printCacheStats()` reports cache hit rate and estimated savings from `getSessionUsage()`.
+- **`/cache` command** (`src/cli/commands/usage.ts`) — `printCacheStats()` reports cache hit rate and estimated savings from `getSessionUsage()`.
 - **`/cost-report` command** — `printCostReport()` shows today/this-month usage with cache-derived savings estimate.
 - **`/effort` (`/reasoning`) command** — `switchReasoningEffort()` toggles R1 reasoning effort between low/medium/high per turn.
-- **Schema-aware tool-call repair** — `repairToolArgs(argsJson, toolName)` in `src/core/pipeline/stages/process-tools-helpers.ts` now takes the tool name so repair can validate against that tool's expected parameter names/types, not just fix JSON syntax.
+- **Schema-aware tool-call repair** — `repairToolArgs(argsJson, toolName)` in `src/core/tools/args-repair.ts` now takes the tool name so repair can validate against that tool's expected parameter names/types, not just fix JSON syntax.
 - **R1 Thought Harvesting** (`src/core/agent/r1-harvester.ts`) — `harvestToolCalls()` scans `reasoning_content` for patterns like `tool_name({...})` that R1 "thought about" but never emitted as a formal tool call; `filterNonEscaped()` excludes any that were already issued for real, `deduplicateHarvested()` collapses duplicates by (tool, first-arg) key. Wired into `post-process.ts`, triggered only when the model produced no formal tool calls and no text output. Covered by `tests/agent/r1-harvester.test.ts` (12 cases).
 
 ## v0.7 additions (concurrent sub-agents, session branching)
@@ -204,7 +225,7 @@ Roadmap target: see `docs/development-guide.md`. Summary:
 
 ### Test coverage gaps
 
-Still not tested: `list_directory`, `search_files`, the 4 pipeline stages individually (`prepare-context`, `stream-response`, `process-tools`, `post-process` — only the integrated `tests/integration/pipeline-e2e.test.ts` and `tests/pipeline/engine.test.ts` exist), `compact.ts` chunking logic, `at-resolver.ts`, `skills.ts` zip install, `lsp/checker.ts` diagnostics.
+Still not tested: the 4 pipeline stages individually (`prepare-context`, `stream-response`, `process-tools`, `post-process` — only the integrated `tests/integration/pipeline-e2e.test.ts` and `tests/pipeline/engine.test.ts` exist), `compact.ts` chunking logic, `at-resolver.ts`, `skills.ts` zip install, `lsp/checker.ts` diagnostics.
 
 An Ink component-level test harness now exists (`ink-testing-library`), covering `App`, `PromptInput`, `ListPicker`, `StatusBar`, `output-channel`, `paste`, `git-branch`, `useHistory`. Still thin: the `useAutocomplete` ↔ `PromptInput` history-vs-dropdown interaction beyond the pure-function unit tests in `tests/cli/useAutocomplete.test.ts`, and `branch-commands.ts` slash-command wiring (`branching.ts` itself is tested, the CLI handler is not).
 

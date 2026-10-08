@@ -21,7 +21,7 @@ npm run typecheck
 npm test
 
 # Single test file
-npx vitest run tests/tools/read_file.test.ts
+npx vitest run tests/tools/read-file.test.ts
 
 # Run compiled output
 npm start
@@ -57,7 +57,7 @@ or skill management. If no API key is configured, `runSetup()` (the first-run
 wizard in `setup.ts`) runs first.
 
 **Ink/React Terminal UI** (`ink/`) — a persistent React tree (`App.tsx`) owns
-the terminal for the whole REPL session. `src/cli/ink/output-channel.ts` is the
+the terminal for the whole REPL session. `src/core/output/output-channel.ts` is the
 output routing seam: in one-shot mode writes fall straight through to stdout;
 once a sink is registered (REPL) writes are routed into Ink state so the
 reconciler owns the live region.
@@ -81,7 +81,7 @@ lists directories up to 20 entries, fetches URLs) and appends formatted
 attachments to the message body. Directory scanning skips `node_modules`,
 `.git`, `dist`, `.next`, `__pycache__`, `.cache`.
 
-**`commands.ts`** — Slash command handler. Returns discriminated unions:
+**`commands/`** — Slash command handler. Returns discriminated unions:
 `handled`, `clear`, `config_changed`, `model_changed`, `skills_reload`, or
 `not_a_command`. The full command list is in the Slash Commands section below.
 `branch-commands.ts` holds the `/branch`, `/tree`, `/switch`,
@@ -177,7 +177,7 @@ one-line warning is printed instead.
 `agent_open` lets the main agent delegate a focused research question to one or
 more isolated sub-agents.
 
-- **Read-only tool set**: `SUBAGENT_TOOL_NAMES` restricts sub-agents to
+- **Read-only tool set**: `getSubagentToolNames()` restricts sub-agents to
   `read_file`, `search_files`, `list_directory`, `code_search`, `web_search`,
   `memory_read`. No `write_file`/`edit_file`/`execute_shell` — sub-agent tool
   calls never go through `confirmOrSkip`.
@@ -213,7 +213,7 @@ wired in `src/core/agent/generator.ts`, sharing a `PipelineContext`
 | ProcessToolCalls | `process-tools.ts` | Parse tool calls, execute via `executeToolCall()`, inject results |
 | PostProcess | `post-process.ts` | Blind-write warnings, token stats, final output; runs R1 thought harvesting |
 
-`process-tools-helpers.ts` is a **helper module, not a stage** — it implements
+`core/tools/tool-executor.ts` (`executeToolCall`) is **not a stage** — it implements
 `executeToolCall()` (confirm flow, `repairToolArgs()` schema-aware JSON repair,
 trust-mode state, workspace permission checks, `setTrustMode()` /
 `setWorkspacePermissions()`).
@@ -224,17 +224,17 @@ Eleven built-in tools, registered in `src/core/tools/registry.ts`:
 
 | Tool | File | Destructive? | Notes |
 |---|---|---|---|
-| `read_file` | `read_file.ts` | No | Optional `start_line`/`end_line` range reading; 100 KB limit; files >100 KB show line count + instructions |
-| `write_file` | `write_file.ts` | **Yes** — diff preview + confirm | |
-| `edit_file` | `edit_file.ts` | **Yes** — diff preview + confirm | CRLF-tolerant matching (`utils/line-endings.ts`), ambiguity guard |
-| `execute_shell` | `execute_shell.ts` | **Yes** — confirm | `timeout_ms` capped at 300 s (5 min); reports captured bytes on timeout |
-| `list_directory` | `list_directory.ts` | No | Default 500 entries; `max_entries` param up to 2000 |
-| `search_files` | `search_files.ts` | No | `is_regex: boolean` and `include_hidden: boolean` params |
+| `read_file` | `read-file.ts` | No | Optional `start_line`/`end_line` range reading; 100 KB limit; files >100 KB show line count + instructions |
+| `write_file` | `write-file.ts` | **Yes** — diff preview + confirm | |
+| `edit_file` | `edit-file.ts` | **Yes** — diff preview + confirm | CRLF-tolerant matching (`utils/line-endings.ts`), ambiguity guard |
+| `execute_shell` | `execute-shell.ts` | **Yes** — confirm | `timeout_ms` capped at 300 s (5 min); reports captured bytes on timeout |
+| `list_directory` | `list-directory.ts` | No | Default 500 entries; `max_entries` param up to 2000 |
+| `search_files` | `search-files.ts` | No | `is_regex: boolean` and `include_hidden: boolean` params |
 | `memory_write` | `memory.ts` | No | Writes to the agent's persistent memory store |
 | `memory_read` | `memory.ts` | No | Reads from the agent's persistent memory store |
-| `web_search` | `web_search.ts` | No | Mojeek (default) / SearXNG / DuckDuckGo |
-| `code_search` | `code_search.ts` | No | Symbol lookup via `/index` (supports `--semantic`); grep fallback |
-| `agent_open` | `agent_open.ts` | No | Delegates a focused research question to isolated sub-agent(s) |
+| `web_search` | `web-search.ts` | No | Mojeek (default) / SearXNG / DuckDuckGo |
+| `code_search` | `code-search.ts` | No | Symbol lookup via `/index` (supports `--semantic`); grep fallback |
+| `agent_open` | `agent-open.ts` | No | Delegates a focused research question to isolated sub-agent(s) |
 
 **`registry.ts`** — Tool definitions (name, description, JSON Schema parameters)
 mapped to implementations. This is what gets sent to the LLM as available
@@ -242,7 +242,7 @@ functions. External callers use `getToolDefinitions()` and `getToolByName()`
 only; `getToolRegistry()` is available for MCP tool injection.
 
 **Safety**: destructive tools are gated behind the confirm-dialog / trust-mode /
-workspace-permission logic in `process-tools-helpers.ts` (`executeToolCall`).
+workspace-permission logic in `core/policy/` and `core/tools/tool-executor.ts` (`executeToolCall`).
 `src/utils/danger.ts` adds a heuristic second net — dangerous shell commands and
 dangerous write paths always force a real prompt, overriding `allow` and
 yes-all/auto mode.
@@ -343,7 +343,7 @@ to avoid circular imports between provider and pipeline stages.
   `allow`/`deny`/`ask` overrides loaded from `.codegrunt/permissions.json`.
   `deny` beats everything (including plan/auto trust mode); `ask` always
   forces a confirm prompt even during yes-for-all. Wired into
-  `process-tools-helpers.ts`. Managed with
+  `core/policy/` and `core/tools/tool-executor.ts`. Managed with
   `/permissions [set <tool> <action> | reset <tool>]`.
 - **`src/core/snapshot/index.ts`** — side-git auto-snapshots in a bare
   `.codegrunt/git` repo on a `snapshots` branch (never touches the user's
@@ -391,7 +391,7 @@ The agent loop has **four distinct execution paths**:
 ### Discriminated Union Returns
 
 Several modules (commands, input, tool executor) return tagged unions rather
-than throwing. Example from `commands.ts`:
+than throwing. Example from `commands/`:
 ```typescript
 type SlashCommandResult =
   | { type: 'handled' }
@@ -436,7 +436,7 @@ but the user's prompt remains readable.
 Write/edit/shell tools compute a diff or display the command, call `confirm()`,
 and only proceed on explicit "yes". The agent loop has no way to bypass this —
 confirmation is inside the tool executor, not the agent. "Yes for all" is
-managed via `process-tools-helpers.ts`, and trust mode (`/trust plan|code|auto`)
+managed via `core/policy/` and `core/tools/tool-executor.ts`, and trust mode (`/trust plan|code|auto`)
 is a session-level override.
 
 ### Model Selection Affects Budget and Behavior
@@ -462,7 +462,7 @@ Intentor and default to the coding path, skipping the Planner.
 
 ## Slash Commands
 
-All commands below are implemented in `src/cli/commands.ts` (with
+All commands below are implemented in `src/cli/commands/` (with
 `branch-commands.ts` handling `/branch`, `/tree`, `/switch`,
 `/subagent-cache`):
 

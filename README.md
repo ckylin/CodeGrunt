@@ -250,7 +250,7 @@ npm test           # 运行 vitest 测试套件
 npm start          # 运行编译后的 dist/cli/index.js
 
 # 运行单个测试文件
-npx vitest run tests/tools/read_file.test.ts
+npx vitest run tests/tools/read-file.test.ts
 ```
 
 关于项目结构的详细说明、架构设计、代理循环等内容，请参阅：

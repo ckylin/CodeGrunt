@@ -126,7 +126,7 @@ export interface ToolResult {
   `{ success: false, error: '...' }` instead, so the failure is reported back
   to the model as something it can react to. An actual thrown exception is
   caught by `executeToolCall()` in
-  `src/core/pipeline/stages/process-tools-helpers.ts`, wrapped in a
+  `src/core/tools/tool-executor.ts`, wrapped in a
   `ToolError` for logging, and converted to a graceful `ToolResult` anyway —
   but returning one directly is the intended path.
 - `userRejected: true` signals the user declined a confirmation prompt
@@ -135,7 +135,7 @@ export interface ToolResult {
   an ordinary tool failure.
 
 Destructive tools (`write_file`, `edit_file`, `execute_shell`) are handled
-specially in `process-tools-helpers.ts`, which gates them behind the
+specially in `core/policy/` and `core/tools/tool-executor.ts`, which gates them behind the
 confirm-dialog / trust-mode / workspace-permission logic before calling
 `execute()`. A new tool only needs this special handling if it's also
 destructive — read-only tools (`read_file`, `search_files`, ...) go straight

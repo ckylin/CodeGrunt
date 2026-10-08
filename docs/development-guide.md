@@ -89,8 +89,7 @@ codegrunt/
 │   ├── cli/                  # CLI 入口、REPL、参数解析
 │   │   ├── index.ts          # 入口（commander 驱动的 CLI）
 │   │   ├── repl.ts           # 交互式 REPL 循环
-│   │   ├── input.ts          # 多行输入、Tab 补全、列表选择器
-│   │   ├── commands.ts       # 斜杠命令（/help, /model, /init 等）
+│   │   ├── commands/         # 斜杠命令（/help, /model, /init 等）
 │   │   ├── branch-commands.ts # /branch, /tree, /switch, /subagent-cache 处理
 │   │   ├── setup.ts          # 首次运行设置向导
 │   │   ├── init.ts           # /init 命令实现：代码库分析 + CODEGRUNT.md 生成
@@ -131,16 +130,16 @@ codegrunt/
 │   │   │       ├── prepare-context.ts   # 构建系统提示 + 注入项目指南
 │   │   │       ├── stream-response.ts   # 流式 LLM 调用 + Token 累积
 │   │   │       ├── process-tools.ts     # 工具调用解析 + 执行 + 结果注入
-│   │   │       ├── process-tools-helpers.ts  # 工具执行辅助（确认流/信任模式/权限/参数修复）
+│   │   │       ├── (see src/core/tools/tool-executor.ts and src/core/policy/)
 │   │   │       └── post-process.ts      # 后处理：盲写警告、Token 统计、R1 回收
 │   │   ├── tools/
 │   │   │   ├── registry.ts   # 插件式 ToolRegistry（运行时注册/移除）
-│   │   │   ├── read_file.ts / write_file.ts / edit_file.ts
-│   │   │   ├── execute_shell.ts / list_directory.ts / search_files.ts
+│   │   │   ├── read-file.ts / write-file.ts / edit-file.ts
+│   │   │   ├── execute-shell.ts / list-directory.ts / search-files.ts
 │   │   │   ├── memory.ts     # memory_write / memory_read 工具
-│   │   │   ├── web_search.ts # Web 搜索工具
-│   │   │   ├── code_search.ts # 代码符号搜索工具
-│   │   │   └── agent_open.ts # 子代理委派工具
+│   │   │   ├── web-search.ts # Web 搜索工具
+│   │   │   ├── code-search.ts # 代码符号搜索工具
+│   │   │   └── agent-open.ts # 子代理委派工具
 │   │   ├── context/
 │   │   │   ├── manager.ts    # 追加式上下文窗口管理（Token 预算、软裁剪）
 │   │   │   ├── compact.ts    # 分层块式对话压缩
@@ -294,16 +293,16 @@ npx vitest                        # 监视模式
 ### 运行单个测试文件
 
 ```bash
-npx vitest run tests/tools/read_file.test.ts
-npx vitest run tests/tools/write_file.test.ts
-npx vitest run tests/tools/execute_shell.test.ts
-npx vitest run tests/tools/edit_file.test.ts
+npx vitest run tests/tools/read-file.test.ts
+npx vitest run tests/tools/write-file.test.ts
+npx vitest run tests/tools/execute-shell.test.ts
+npx vitest run tests/tools/edit-file.test.ts
 npx vitest run tests/agent/intentor_planner.test.ts
 npx vitest run tests/agent/subagent.test.ts
 npx vitest run tests/context/context_manager.test.ts
 npx vitest run tests/pipeline/engine.test.ts
 npx vitest run tests/integration/pipeline-e2e.test.ts
-npx vitest run tests/core/process-tools-helpers.test.ts
+npx vitest run tests/pipeline/tool-executor.test.ts
 npx vitest run tests/cli/PromptInput.test.tsx
 ```
 
@@ -324,7 +323,7 @@ tests/
 ├── context/        # context_manager
 ├── core/           # permissions / branching / subagent-cache / swebench / mcp / index / embedder / billing / crash-report / errors
 ├── cli/            # App / PromptInput / ListPicker / StatusBar / output-channel / paste / git-branch / useAutocomplete / useHistory（Ink 组件测试）
-├── pipeline/       # engine / process-tools-helpers
+├── pipeline/       # engine / stages
 ├── integration/    # pipeline-e2e（真实 4 阶段串接）
 ├── providers/      # deepseek-retry
 ├── utils/          # constants / danger / interrupt / line-endings / markdown / pager / select / tool-spinner / plan-display
@@ -344,7 +343,7 @@ tests/
 
 ```typescript
 import { describe, it, expect } from 'vitest';
-import { readFileTool } from '../../src/core/tools/read_file.js';
+import { readFileTool } from '../../src/core/tools/read-file.js';
 
 describe('read_file', () => {
   it('读取已存在的文件', async () => {
@@ -454,7 +453,7 @@ Intentor 优先使用快速启发式规则：
 | `code_search` | 代码符号搜索（需先运行 `/index`） | 否 |
 | `agent_open` | 委派研究任务给只读子代理 | 否 |
 
-**安全性**：在破坏性操作（write_file、edit_file、execute_shell）之前，执行器会显示 diff 预览并请求用户确认，提供三个选项：是、本次会话全部允许、否。Workspace 级别权限文件（`.codegrunt/permissions.json`）可覆盖每个工具的行为（allow/deny/ask），选择器在 `process-tools-helpers.ts` 中管理。
+**安全性**：在破坏性操作（write_file、edit_file、execute_shell）之前，执行器会显示 diff 预览并请求用户确认，提供三个选项：是、本次会话全部允许、否。Workspace 级别权限文件（`.codegrunt/permissions.json`）可覆盖每个工具的行为（allow/deny/ask），选择器在 `core/policy/` and `core/tools/tool-executor.ts` 中管理。
 
 ### 管道引擎（src/core/pipeline/）
 
@@ -467,7 +466,7 @@ Intentor 优先使用快速启发式规则：
 | ProcessToolCalls | `process-tools.ts` | 解析工具调用、通过 executor 执行、注入结果 |
 | PostProcess | `post-process.ts` | 盲写警告检测、Token 统计、最终输出格式化、R1 思考内容工具调用回收 |
 
-> `process-tools-helpers.ts` **不是**一个独立阶段，而是辅助模块：实现 `executeToolCall()`（破坏性工具确认流、`/trust` 信任模式、workspace 权限检查、`repairToolArgs()` schema 感知参数修复）。
+> `executeToolCall()` 位于 `core/tools/tool-executor.ts`，并不属于某个阶段：实现 `executeToolCall()`（破坏性工具确认流、`/trust` 信任模式、workspace 权限检查、`repairToolArgs()` schema 感知参数修复）。
 
 所有阶段共享一个 `PipelineContext`，由 `PipelineEngine` 按序执行。
 
@@ -699,7 +698,7 @@ import { myTool } from './my_tool.js';
 
 ### 步骤 3：添加安全确认（如果是破坏性操作）
 
-破坏性工具需要实现 diff 预览和确认流程。确认逻辑在 `process-tools-helpers.ts` 中（`executeToolCall` 函数）。确认后将结果注入消息历史。
+破坏性工具需要实现 diff 预览和确认流程。确认逻辑在 `core/policy/` and `core/tools/tool-executor.ts` 中（`executeToolCall` 函数）。确认后将结果注入消息历史。
 
 ### 步骤 4：编写测试
 
@@ -720,7 +719,7 @@ describe('my_tool', () => {
 
 ## 斜杠命令
 
-CodeGrunt 在交互式 REPL 中提供了一组斜杠命令，实现在 `src/cli/commands.ts` 中。
+CodeGrunt 在交互式 REPL 中提供了一组斜杠命令，实现在 `src/cli/commands/` 中。
 
 | 命令 | 描述 |
 |---|---|

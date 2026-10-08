@@ -13,7 +13,9 @@
     "test": "vitest run",
     "bench": "tsx scripts/bench.ts",
     "start": "node dist/cli/index.js",
-    "prepublishOnly": "npm run build"
+    "prepublishOnly": "npm run build",
+    "lint": "eslint src tests",
+    "format:check": "prettier --check \"src/**/*.{ts,tsx}\""
   },
   "files": [
     "dist/"
@@ -32,13 +34,17 @@
     "string-width": "^8.2.1"
   },
   "devDependencies": {
+    "@eslint/js": "9.39.5",
     "@types/adm-zip": "^0.5.8",
     "@types/diff": "^7.0.2",
     "@types/node": "^20.14.0",
     "@types/react": "^18.3.0",
+    "eslint": "9.39.5",
     "ink-testing-library": "^4.0.0",
+    "prettier": "3.9.9",
     "tsx": "^4.22.3",
     "typescript": "^5.5.0",
+    "typescript-eslint": "8.71.1",
     "vitest": "^2.0.0"
   },
   "engines": {

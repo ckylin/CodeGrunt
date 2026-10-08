@@ -89,7 +89,6 @@ codegrunt/
 │   ├── cli/                  # CLI entry point, REPL, argument parsing
 │   │   ├── index.ts          # Entry point (commander-based CLI)
 │   │   ├── repl.ts           # Interactive REPL loop
-│   │   ├── input.ts          # Multiline input, tab completion, list selector
 │   │   ├── ink/              # Ink/React terminal UI components
 │   │   │   ├── PromptInput.tsx   # Main input with cursor, history, autocomplete
 │   │   │   ├── Dropdown.tsx      # Autocomplete dropdown overlay
@@ -97,7 +96,7 @@ codegrunt/
 │   │   │   ├── useAutocomplete.ts # File/slash/skill completion
 │   │   │   ├── useHistory.ts     # Persistent command history
 │   │   │   └── types.ts          # Ink component types
-│   │   ├── commands.ts       # Slash commands (/help, /model, /init, etc.)
+│   │   ├── commands/         # Slash commands (/help, /model, /init, etc.)
 │   │   ├── setup.ts          # First-run setup wizard
 │   │   ├── init.ts           # /init command: codebase analysis + CODEGRUNT.md gen
 │   │   ├── skills.ts         # Skill loading and management
@@ -118,20 +117,20 @@ codegrunt/
 │   │   │       ├── prepare-context.ts   # Build system prompt + inject project guide
 │   │   │       ├── stream-response.ts   # Stream LLM call + token accumulation
 │   │   │       ├── process-tools.ts     # Parse tool calls + execute + inject results
-│   │   │       ├── process-tools-helpers.ts  # yes-for-all session state
+│   │   │       ├── (see src/core/tools/tool-executor.ts and src/core/policy/)
 │   │   │       └── post-process.ts      # Post-process: blind-write warnings, token stats
 │   │   ├── tools/
 │   │   │   ├── registry.ts   # Plugin-style ToolRegistry (runtime register/remove)
-│   │   │   ├── read_file.ts
-│   │   │   ├── write_file.ts
-│   │   │   ├── edit_file.ts
-│   │   │   ├── execute_shell.ts
-│   │   │   ├── list_directory.ts
-│   │   │   ├── search_files.ts
+│   │   │   ├── read-file.ts
+│   │   │   ├── write-file.ts
+│   │   │   ├── edit-file.ts
+│   │   │   ├── execute-shell.ts
+│   │   │   ├── list-directory.ts
+│   │   │   ├── search-files.ts
 │   │   │   ├── memory.ts     # memory_write / memory_read tools
-│   │   │   ├── web_search.ts # Web search tool
-│   │   │   ├── code_search.ts # Code symbol search tool
-│   │   │   └── agent_open.ts # Sub-agent delegation tool
+│   │   │   ├── web-search.ts # Web search tool
+│   │   │   ├── code-search.ts # Code symbol search tool
+│   │   │   └── agent-open.ts # Sub-agent delegation tool
 │   │   ├── context/
 │   │   │   ├── manager.ts    # Context window management (token budget, trimming)
 │   │   │   ├── compact.ts    # Hierarchical chunk-based conversation compaction
@@ -293,10 +292,10 @@ npx vitest                        # Watch mode
 ### Running Individual Test Files
 
 ```bash
-npx vitest run tests/tools/read_file.test.ts
-npx vitest run tests/tools/write_file.test.ts
-npx vitest run tests/tools/execute_shell.test.ts
-npx vitest run tests/tools/edit_file.test.ts
+npx vitest run tests/tools/read-file.test.ts
+npx vitest run tests/tools/write-file.test.ts
+npx vitest run tests/tools/execute-shell.test.ts
+npx vitest run tests/tools/edit-file.test.ts
 npx vitest run tests/agent/intentor_planner.test.ts
 npx vitest run tests/agent/subagent.test.ts
 npx vitest run tests/context/context_manager.test.ts
@@ -404,7 +403,7 @@ Tools are how the LLM interacts with the user's environment. Each tool implement
 | `code_search` | Code symbol search (requires `/index` first) | No |
 | `agent_open` | Delegate research task to read-only sub-agent | No |
 
-**Safety**: Before destructive operations, the executor shows a diff preview and asks for user confirmation with three options: Yes, Yes for all (session), No. Workspace-level permission files (`.codegrunt/permissions.json`) can override per-tool behavior (allow/deny/ask), managed in `process-tools-helpers.ts`.
+**Safety**: Before destructive operations, the executor shows a diff preview and asks for user confirmation with three options: Yes, Yes for all (session), No. Workspace-level permission files (`.codegrunt/permissions.json`) can override per-tool behavior (allow/deny/ask), managed in `core/policy/` and `core/tools/tool-executor.ts`.
 
 ### Pipeline Engine (`src/core/pipeline/`)
 
@@ -415,7 +414,7 @@ Inspired by Harness CI/CD pipelines, each agent interaction is decomposed into 5
 | PrepareContext | `prepare-context.ts` | Build system prompt, inject project guide, init messages |
 | StreamResponse | `stream-response.ts` | Stream LLM call, accumulate text/reasoning/tool calls; forwards real cache hit/miss tokens |
 | ProcessToolCalls | `process-tools.ts` | Parse tool calls, execute via executor, inject results |
-| ProcessToolHelpers | `process-tools-helpers.ts` | yes-for-all session-level state management |
+| ToolExecutor | `core/tools/tool-executor.ts`, `core/policy/` | gates, confirm strategies, session-level yes-for-all state |
 | PostProcess | `post-process.ts` | Blind-write detection, token stats, final output formatting |
 
 All stages share a `PipelineContext`, executed sequentially by `PipelineEngine`.
@@ -640,7 +639,7 @@ import { myTool } from './my_tool.js';
 
 ### Step 3: Add Safety Confirmation (if destructive)
 
-Destructive tools need to implement diff preview and confirmation flow. The confirmation logic is in `process-tools-helpers.ts` (the `executeToolCall` function). Results are injected into the message history after confirmation.
+Destructive tools need to implement diff preview and confirmation flow. The confirmation logic is in `core/policy/` and `core/tools/tool-executor.ts` (the `executeToolCall` function). Results are injected into the message history after confirmation.
 
 ### Step 4: Write Tests
 
@@ -661,7 +660,7 @@ describe('my_tool', () => {
 
 ## Slash Commands
 
-CodeGrunt provides a set of slash commands available in the interactive REPL, implemented in `src/cli/commands.ts`.
+CodeGrunt provides a set of slash commands available in the interactive REPL, implemented in `src/cli/commands/`.
 
 | Command | Description |
 |---|---|
