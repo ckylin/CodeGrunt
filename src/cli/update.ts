@@ -5,6 +5,7 @@ import { fileURLToPath } from 'url';
 import chalk from 'chalk';
 import ora from 'ora';
 import { printError } from '../utils/display.js';
+import { askOnce } from '../utils/prompt.js';
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -146,12 +147,7 @@ export async function runUpdate(opts: UpdateOptions): Promise<void> {
 
   // ── Confirm ──
   if (!opts.confirm) {
-    const readline = await import('readline');
-    const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-    const answer = await new Promise<string>((resolve) => {
-      rl.question(chalk.bold('Upgrade now? [y/N] '), resolve);
-    });
-    rl.close();
+    const answer = await askOnce(chalk.bold('Upgrade now? [y/N] '));
     if (!answer.toLowerCase().startsWith('y')) {
       console.log(chalk.gray('Update cancelled.'));
       return;

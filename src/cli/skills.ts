@@ -3,23 +3,9 @@ import { join, resolve, basename } from 'path';
 import { homedir } from 'os';
 import type { Dirent } from 'fs';
 import AdmZip from 'adm-zip';
+import type { Skill } from '../types.js';
 
-export interface Skill {
-  name: string;
-  description?: string;
-  /** Optional system prompt override. When set, this replaces the default
-   *  coding-assistant identity for the skill session, allowing the skill
-   *  to define a completely different role (e.g. "You are a BaZi master"). */
-  system?: string;
-  /** 'subagent' routes this skill through the isolated read-only sub-agent
-   *  loop (src/core/agent/subagent.ts) instead of the main chat loop —
-   *  useful for research-style skills that shouldn't touch write/edit/shell
-   *  tools or pollute the caller's conversation history. Defaults to 'inline'. */
-  mode?: 'inline' | 'subagent';
-  content: string;
-  source: 'project' | 'global';
-  file: string; // relative file name
-}
+export type { Skill };
 
 /** Parse YAML-style frontmatter from a markdown file.
  *  Supports both simple `key: value` pairs and multi-line literal blocks

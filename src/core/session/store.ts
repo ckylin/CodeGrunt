@@ -9,7 +9,7 @@
 //   - Auto-save triggered by the REPL after every agent turn
 //   - --resume <id> or /resume restores messages into ContextManager
 
-import { readFile, writeFile, mkdir, readdir, unlink } from 'fs/promises';
+import { readFile, writeFile, mkdir, unlink } from 'fs/promises';
 import { existsSync } from 'fs';
 import { homedir } from 'os';
 import { join } from 'path';

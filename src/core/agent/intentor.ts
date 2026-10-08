@@ -13,10 +13,11 @@
 import chalk from 'chalk';
 import type { LLMProvider, Message } from '../../types.js';
 import type { IntentResult } from '../pipeline/types.js';
-import type { Skill } from '../../cli/skills.js';
+import type { Skill } from '../../types.js';
 import { getLogger } from '../observability/logger.js';
 import { getDefaultMetrics } from '../observability/metrics.js';
-import { hasSink } from '../../cli/ink/output-channel.js';
+import { hasSink } from '../output/output-channel.js';
+import { fastModelFor, isDeepSeekV4Model } from '../../providers/model-policy.js';
 
 const log = getLogger('intentor');
 
@@ -256,8 +257,7 @@ function stopSpinner(interval: ReturnType<typeof setInterval> | null): void {
 // reasoning power of pro/reasoner models. Use the cheapest available model.
 // For DeepSeek providers: flash. For others: fall back to whatever is configured.
 function selectLightModel(configuredModel: string): string {
-  if (configuredModel.startsWith('deepseek-')) return 'deepseek-v4-flash';
-  return configuredModel;
+  return fastModelFor(configuredModel);
 }
 
 // ── Main export ──────────────────────────────────────────────────────────
@@ -386,7 +386,7 @@ export function selectModelForTask(
   intent: IntentResult,
 ): string {
   // Only route within the V4 flash/pro tier — leave everything else alone
-  if (!configuredModel.startsWith('deepseek-v4-')) {
+  if (!isDeepSeekV4Model(configuredModel)) {
     return configuredModel;
   }
 

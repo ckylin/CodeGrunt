@@ -7,8 +7,9 @@
 
 import type { Stage, StageResult, PipelineContext } from '../types.js';
 import type { ToolCallMessage } from '../../../types.js';
-import { READ_TOOL_NAMES, WRITE_TOOL_NAMES } from '../types.js';
-import { executeToolCall, repairToolArgs } from './process-tools-helpers.js';
+import { toolHasTrait } from '../../tools/registry.js';
+import { executeToolCall } from '../../tools/tool-executor.js';
+import { repairToolArgs } from '../../tools/args-repair.js';
 import { getLogger } from '../../observability/logger.js';
 import { getDefaultEventBus, type ToolCallEvent, type ToolResultEvent } from '../../events/bus.js';
 import { getDefaultMetrics } from '../../observability/metrics.js';
@@ -38,8 +39,8 @@ export class ProcessToolCallsStage implements Stage {
     } as ToolCallMessage);
 
     // Anti-hallucination: detect blind write pattern
-    const hasWriteInBatch = ctx.toolCalls.some(tc => WRITE_TOOL_NAMES.has(tc.function.name));
-    const hasReadInBatch = ctx.toolCalls.some(tc => READ_TOOL_NAMES.has(tc.function.name));
+    const hasWriteInBatch = ctx.toolCalls.some(tc => toolHasTrait(tc.function.name, 'writesFiles'));
+    const hasReadInBatch = ctx.toolCalls.some(tc => toolHasTrait(tc.function.name, 'readsFiles'));
     const shouldWarnBlindWrite = hasWriteInBatch && !hasReadInBatch && !ctx.hasReadThisTurn && !ctx.warnedBlindWrite;
 
     // Keep a reference to the assistant message we just pushed so we can trim
@@ -60,7 +61,7 @@ export class ProcessToolCallsStage implements Stage {
       }
 
       // Track reads for blind-write detection
-      if (READ_TOOL_NAMES.has(tc.function.name)) {
+      if (toolHasTrait(tc.function.name, 'readsFiles')) {
         ctx.hasReadThisTurn = true;
       }
 
@@ -109,7 +110,7 @@ export class ProcessToolCallsStage implements Stage {
 
       let result;
       try {
-        result = await executeToolCall(tc.function.name, effectiveArgsJson, ctx.cwd);
+        result = await executeToolCall(tc.function.name, effectiveArgsJson, ctx.cwd, ctx.signal);
       } catch (err) {
         result = {
           success: false,
@@ -216,7 +217,7 @@ export class ProcessToolCallsStage implements Stage {
 
     // Run language diagnostics after write/edit operations.
     // Only inject if there are actual errors — warnings alone don't block progress.
-    const hadWrite = ctx.toolCalls.some(tc => WRITE_TOOL_NAMES.has(tc.function.name));
+    const hadWrite = ctx.toolCalls.some(tc => toolHasTrait(tc.function.name, 'writesFiles'));
     if (hadWrite) {
       try {
         const diagnostics = await runDiagnostics(ctx.cwd);
@@ -234,6 +235,3 @@ export class ProcessToolCallsStage implements Stage {
     return { continue: true, done: false };
   }
 }
-
-// ── Tool execution helper (extracted from executor) ──────────────────────
-// Imported from process-tools-helpers to keep this file focused on the stage logic

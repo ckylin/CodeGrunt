@@ -116,30 +116,19 @@ export async function saveConfig(config: CodeGruntConfig): Promise<void> {
   );
 }
 
-/**
- * Detect whether the current model is a DeepSeek "pure" reasoner (R1) model.
- * R1 models do NOT support `temperature`, reject the `system` role, and
- * require the system prompt to be embedded in the first user message.
- */
-export function isReasonerModel(model: string): boolean {
-  const lower = model.toLowerCase();
-  return lower.includes('reasoner') || lower.includes('r1');
-}
+export { isReasonerModel, supportsReasoning } from './providers/model-policy.js';
 
 /**
- * Detect whether the model supports reasoning/thinking capabilities
- * (emits reasoning_content, supports reasoning_effort parameter).
- * This includes R1 reasoner models AND V4 Pro models.
+ * Both DeepSeek V4 Pro/Flash and R1 reasoner models now ship a 1M-token
+ * context window (raised from the older 128K-class models this budget was
+ * originally sized for). These budgets are deliberately kept far below that
+ * ceiling: growing conversation history toward 1M tokens multiplies the
+ * cache-miss cost on every turn that doesn't hit DeepSeek's disk-based
+ * prefix cache ($0.14/M miss vs $0.014/M hit — see ContextManager's
+ * cache-preservation comments), and bloats per-turn latency. Treat these as
+ * a cost/latency budget, not the model's actual context ceiling.
  */
-export function supportsReasoning(model: string): boolean {
-  const lower = model.toLowerCase();
-  return isReasonerModel(model)
-    || lower.includes('v4')
-    || lower.includes('pro');
-}
-
-/** Reasoner models have a huge context (1M tokens) — give them more room */
 export const CONTEXT_BUDGET = 100_000;
 
-/** Chat model context window is 128K — budget for conversation history */
+/** Chat-tier model budget — same rationale as CONTEXT_BUDGET above. */
 export const CHAT_CONTEXT_BUDGET = 90_000;

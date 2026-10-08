@@ -3,9 +3,8 @@ import { resolve, dirname, basename, isAbsolute } from 'path';
 import { homedir } from 'os';
 import type { Skill } from '../skills.js';
 import type { DropdownItem } from './types.js';
-import { BUILTIN_COMMANDS } from '../commands.js';
-
-const SKIP_DIRS = new Set(['node_modules', '.git', 'dist', '.next', '__pycache__', 'coverage']);
+import { BUILTIN_COMMANDS } from '../commands/index.js';
+import { SKIP_DIRS_AUTOCOMPLETE as SKIP_DIRS } from '../../utils/fs-ignore.js';
 
 // Derived from BUILTIN_COMMANDS (the canonical command list in commands.ts)
 // rather than a separate hardcoded array — otherwise new slash commands

@@ -1,24 +1,26 @@
-import { spawn } from 'child_process';
+import { spawn, spawnSync } from 'child_process';
 import { platform } from 'os';
 import type { Tool, ToolResult } from '../../types.js';
+import { OutputAccumulator, type OutputSnapshot } from './output-accumulator.js';
+import { DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, formatSize } from './truncate.js';
 
 const DEFAULT_TIMEOUT_MS = 30_000;
 const MAX_TIMEOUT_MS = 300_000; // 5 minutes hard cap
-const MAX_OUTPUT_BYTES = 512 * 1024; // 512 KB cap to avoid huge outputs stalling the LLM
+const IS_WINDOWS = platform() === 'win32';
 
-// ── Platform-aware tool description ──────────────────────────────────────
-// The LLM frequently generates commands for the wrong OS. By embedding the
-// exact platform and concrete syntax examples directly into the tool
-// description (which the model reads right before generating the function
-// call), we dramatically reduce cross-platform command errors.
-
+// The LLM frequently generates commands for the wrong OS. Embedding the exact
+// platform and concrete syntax in the tool description (which the model reads
+// right before generating the call) cuts cross-platform command errors.
 function buildShellDescription(): string {
-  const base = 'Execute a shell command and return its output. The working directory is already set to the project root — do NOT prepend "cd <path> &&" to commands. Use for running tests, builds, installing packages, git commands, etc. Timeout: default 30s, max 5 minutes.';
+  const base =
+    'Execute a shell command and return its output. The working directory is already set to the project root; do NOT prepend "cd <path> &&" to commands. ' +
+    'Use for running tests, builds, installing packages, git commands, etc. Timeout: default 30s, max 5 minutes. ' +
+    `Output is truncated to the last ${DEFAULT_MAX_LINES} lines or ${formatSize(DEFAULT_MAX_BYTES)}; when truncated, the full output is saved to a temp file and its path is reported.`;
 
-  if (platform() === 'win32') {
+  if (IS_WINDOWS) {
     return `${base}
 
-⚠️  YOU ARE ON WINDOWS. Commands run in cmd.exe. You MUST use Windows syntax:
+WARNING: YOU ARE ON WINDOWS. Commands run in cmd.exe. You MUST use Windows syntax:
 - Use backslashes in paths: C:\\Users\\... not /home/...
 - List files: dir not ls
 - Remove file: del not rm
@@ -28,10 +30,9 @@ function buildShellDescription(): string {
 - Print to stdout: echo %VAR% not echo $VAR
 - Set env: set VAR=value not export VAR=value
 - Chain commands with && (same as Unix)
-- npm/npx/node work the same as on Unix — prefer them when possible`;
+- npm/npx/node work the same as on Unix, prefer them when possible`;
   }
 
-  // macOS or Linux — POSIX
   return `${base}
 
 You are on ${platform() === 'darwin' ? 'macOS' : 'Linux'}. Use POSIX shell syntax:
@@ -46,7 +47,36 @@ You are on ${platform() === 'darwin' ? 'macOS' : 'Linux'}. Use POSIX shell synta
 - npm/npx/node work as usual`;
 }
 
+/** Kill the shell and everything it spawned, not just the shell itself. */
+function killProcessTree(pid: number): void {
+  if (IS_WINDOWS) {
+    spawnSync('taskkill', ['/pid', String(pid), '/T', '/F'], { stdio: 'ignore', windowsHide: true });
+    return;
+  }
+  try {
+    process.kill(-pid, 'SIGKILL');
+  } catch {
+    try { process.kill(pid, 'SIGKILL'); } catch { /* already gone */ }
+  }
+}
+
+function withTruncationNotice(snap: OutputSnapshot): string {
+  const t = snap.truncation;
+  let text = snap.content;
+  if (!t.truncated) return text;
+  const full = snap.fullOutputPath ? ` Full output: ${snap.fullOutputPath}` : '';
+  if (t.lastLinePartial) {
+    text += `\n\n[Showing the last ${formatSize(t.outputBytes)} of line ${t.totalLines}.${full}]`;
+  } else if (t.truncatedBy === 'lines') {
+    text += `\n\n[Output truncated: showing last ${t.outputLines} of ${t.totalLines} lines.${full}]`;
+  } else {
+    text += `\n\n[Output truncated: showing last ${t.outputLines} of ${t.totalLines} lines (${formatSize(DEFAULT_MAX_BYTES)} limit).${full}]`;
+  }
+  return text;
+}
+
 export const executeShellTool: Tool = {
+  meta: { destructive: true },
   definition: {
     type: 'function',
     function: {
@@ -55,17 +85,14 @@ export const executeShellTool: Tool = {
       parameters: {
         type: 'object',
         properties: {
-          command: {
-            type: 'string',
-            description: 'The shell command to execute',
-          },
+          command: { type: 'string', description: 'The shell command to execute' },
           cwd: {
             type: 'string',
             description: 'Working directory for the command (optional, defaults to current directory)',
           },
           timeout_ms: {
             type: 'number',
-            description: `Timeout in milliseconds (default: ${DEFAULT_TIMEOUT_MS})`,
+            description: `Timeout in milliseconds (default: ${DEFAULT_TIMEOUT_MS}, max: ${MAX_TIMEOUT_MS})`,
           },
         },
         required: ['command'],
@@ -73,73 +100,66 @@ export const executeShellTool: Tool = {
     },
   },
 
-  async execute(args): Promise<ToolResult> {
+  async execute(args, ctx): Promise<ToolResult> {
     const command = args.command as string;
-    const cwd = (args.cwd as string | undefined) ?? process.cwd();
+    const cwd = (args.cwd as string | undefined) ?? ctx?.cwd ?? process.cwd();
     const rawTimeout = (args.timeout_ms as number | undefined) ?? DEFAULT_TIMEOUT_MS;
     const clamped = rawTimeout > MAX_TIMEOUT_MS;
     const timeoutMs = clamped ? MAX_TIMEOUT_MS : rawTimeout;
+    const confirmDurationMs = (args._confirmDurationMs as number | undefined) ?? 0;
+    const signal = ctx?.signal;
+
+    if (signal?.aborted) return { success: false, output: '', error: 'Command aborted', confirmDurationMs };
 
     return new Promise((resolve) => {
-      const chunks: Buffer[] = [];
-      let totalBytes = 0;
-      let truncated = false;
+      const out = new OutputAccumulator();
       let timedOut = false;
+      let aborted = false;
+      let settled = false;
 
       const child = spawn(command, {
         shell: true,
         cwd,
         stdio: ['ignore', 'pipe', 'pipe'],
+        detached: !IS_WINDOWS,
+        windowsHide: true,
       });
 
-      const onData = (data: Buffer): void => {
-        if (truncated) return;
-        const remaining = MAX_OUTPUT_BYTES - totalBytes;
-        if (data.length <= remaining) {
-          chunks.push(data);
-          totalBytes += data.length;
-        } else {
-          chunks.push(data.subarray(0, remaining));
-          totalBytes += remaining;
-          truncated = true;
-        }
-      };
+      const stop = (): void => { if (child.pid) killProcessTree(child.pid); };
+      const onAbort = (): void => { aborted = true; stop(); };
+      const timer = setTimeout(() => { timedOut = true; stop(); }, timeoutMs);
+      signal?.addEventListener('abort', onAbort, { once: true });
+      const cleanup = (): void => { clearTimeout(timer); signal?.removeEventListener('abort', onAbort); };
 
-      child.stdout.on('data', onData);
-      child.stderr.on('data', onData);
+      child.stdout.on('data', (d: Buffer) => out.append(d));
+      child.stderr.on('data', (d: Buffer) => out.append(d));
 
-      // SIGKILL fallback timer — tracked separately so it can be cleared if the
-      // child exits on its own after SIGTERM but before the 2s fallback fires.
-      // Without clearing it, the Node event loop hangs an extra 2s after every
-      // timed-out command, even ones that terminate cleanly.
-      let killTimer: NodeJS.Timeout | undefined;
-
-      const timer = setTimeout(() => {
-        timedOut = true;
-        child.kill('SIGTERM');
-        killTimer = setTimeout(() => { try { child.kill('SIGKILL'); } catch { /* already dead */ } }, 2000);
-      }, timeoutMs);
-
-      child.on('close', (code) => {
-        clearTimeout(timer);
-        if (killTimer) clearTimeout(killTimer);
-        let output = Buffer.concat(chunks).toString('utf-8');
-        if (truncated) output += `\n[Output truncated at ${MAX_OUTPUT_BYTES} bytes]`;
-        if (clamped) output += `\n[timeout clamped to 5min]`;
-        const confirmDurationMs = (args._confirmDurationMs as number | undefined) ?? 0;
-        if (timedOut) {
-          resolve({ success: false, output, error: `Command timed out after ${timeoutMs}ms (captured ${totalBytes} bytes)`, confirmDurationMs });
+      child.on('close', async (code) => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        out.finish();
+        const snap = out.snapshot();
+        await out.closeTempFile();
+        let text = withTruncationNotice(snap);
+        if (clamped) text += '\n[timeout clamped to 5min]';
+        if (aborted) {
+          resolve({ success: false, output: text, error: 'Command aborted', confirmDurationMs });
+        } else if (timedOut) {
+          resolve({ success: false, output: text, error: `Command timed out after ${timeoutMs}ms (captured ${snap.truncation.totalBytes} bytes)`, confirmDurationMs });
         } else if (code !== 0) {
-          resolve({ success: false, output, error: `Command exited with code ${code}`, confirmDurationMs });
+          const why = code === null ? 'Command terminated by a signal' : `Command exited with code ${code}`;
+          resolve({ success: false, output: text, error: why, confirmDurationMs });
         } else {
-          resolve({ success: true, output: output || '(no output)', confirmDurationMs });
+          resolve({ success: true, output: text || '(no output)', confirmDurationMs });
         }
       });
 
       child.on('error', (err) => {
-        clearTimeout(timer);
-        if (killTimer) clearTimeout(killTimer);
-        resolve({ success: false, output: '', error: err.message, confirmDurationMs: (args._confirmDurationMs as number | undefined) ?? 0 });
+        if (settled) return;
+        settled = true;
+        cleanup();
+        resolve({ success: false, output: '', error: err.message, confirmDurationMs });
       });
     });
   },

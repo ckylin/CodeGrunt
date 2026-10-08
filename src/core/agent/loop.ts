@@ -14,12 +14,12 @@
 import type { AgentRunOptions } from '../../types.js';
 import chalk from 'chalk';
 import { ContextManager } from '../context/manager.js';
-import { resetYesAll, isYesAllActive, setTrustMode, setWorkspacePermissions } from '../pipeline/stages/process-tools-helpers.js';
+import { resetYesAll, isYesAllActive, setTrustMode, setWorkspacePermissions } from '../policy/state.js';
 import { loadWorkspacePermissions } from '../permissions/index.js';
 import { detectInputLanguage } from '../memory/habits.js';
 import type { TurnSignal } from '../../types.js';
 import { printIntentResult } from '../../utils/display.js';
-import { write as chWrite } from '../../cli/ink/output-channel.js';
+import { write as chWrite } from '../output/output-channel.js';
 import { CHAT_CONTEXT_BUDGET } from '../../config.js';
 import { detectSystemLanguage } from '../../utils/locale.js';
 import { compactMessages } from '../context/compact.js';
@@ -102,7 +102,7 @@ export async function maybeAutoCompact(
 // ── Main Agent Loop (P/G/E orchestration) ────────────────────────────────
 
 export async function runAgentLoop(options: AgentRunOptions): Promise<void> {
-  const { task, cwd, config, provider, onText, onToolCall, onToolResult, signal } = options;
+  const { task, cwd, config, provider, signal } = options;
   const model = config.model;
 
   const context = options.context ?? new ContextManager(CHAT_CONTEXT_BUDGET);
@@ -154,8 +154,12 @@ export async function runAgentLoop(options: AgentRunOptions): Promise<void> {
 
   // Auto-routing thinking mode based on complexity tier.
   // Simple tasks → thinking disabled (save output tokens)
-  // Complex tasks → thinking enabled (when autoThinkingMode is on)
-  // Medium tasks → model default (undisturbed)
+  // Complex tasks → thinking enabled (when autoThinkingMode is on), plus
+  //   reasoning_effort bumped to 'high' — a complex task deserves the
+  //   model's deepest thinking tier, not whatever static effort the user
+  //   configured for routine turns via CODEGRUNT_REASONING_EFFORT/config.
+  // Medium tasks → model default (undisturbed) — both thinking and effort
+  //   are left exactly as configured, unchanged from before.
   const complexity = classifyComplexity(task);
   if (complexity.isCode) {
     if (complexity.tier === 'simple') {
@@ -165,9 +169,13 @@ export async function runAgentLoop(options: AgentRunOptions): Promise<void> {
     } else if (complexity.tier === 'complex') {
       const autoThinking = config.autoThinkingMode ?? true;
       if (autoThinking) {
-        activeOptions = { ...activeOptions, thinking: 'enabled' as const };
-        chWrite(chalk.gray(`  [thinking: enabled (complex task)]\n`));
-        log.info('Thinking enabled for complex task');
+        activeOptions = {
+          ...activeOptions,
+          thinking: 'enabled' as const,
+          config: { ...activeOptions.config, reasoningEffort: 'high' as const },
+        };
+        chWrite(chalk.gray(`  [thinking: enabled, effort: high (complex task)]\n`));
+        log.info('Thinking enabled for complex task', { reasoningEffort: 'high' });
       }
     }
   }

@@ -5,8 +5,8 @@ import { StatusBar } from './StatusBar.js';
 import { ListPicker } from './ListPicker.js';
 import {
   registerSink, unregisterSink, registerPickerHandler, unregisterPickerHandler,
-} from './output-channel.js';
-import type { LiveToolInfo, OutputChannelSink, PickerHandler } from './output-channel.js';
+} from '../../core/output/output-channel.js';
+import type { LiveToolInfo, OutputChannelSink, PickerHandler } from '../../core/output/output-channel.js';
 import type { InputResult, Skill, SelectorItem } from './types.js';
 
 // ── Imperative facade over the persistent Ink tree ───────────────────────
@@ -94,7 +94,6 @@ function App({ cwd, model, gitBranch, skills, activeSkill, showMeta, onReady }: 
       unregisterSink();
       unregisterPickerHandler();
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // Ticks the visible "Ns" elapsed counter while busy. Restarts cleanly
@@ -130,13 +129,6 @@ function App({ cwd, model, gitBranch, skills, activeSkill, showMeta, onReady }: 
         <Text dimColor>{`  ${liveTool.frame} ${liveTool.name}  ${liveTool.argPreview}`}</Text>
       )}
       {liveText && <Text>{liveText}</Text>}
-      <StatusBar
-        model={model}
-        gitBranch={gitBranch}
-        totalTokens={totalTokens}
-        busySince={busySince}
-        elapsedSeconds={elapsedSeconds}
-      />
       {activePicker ? (
         // A picker (from /model, /resume, /restore, ...) replaces the
         // prompt entirely while active — matches the pre-existing UX where
@@ -160,6 +152,13 @@ function App({ cwd, model, gitBranch, skills, activeSkill, showMeta, onReady }: 
           onSubmit={handleSubmit}
         />
       )}
+      <StatusBar
+        model={model}
+        gitBranch={gitBranch}
+        totalTokens={totalTokens}
+        busySince={busySince}
+        elapsedSeconds={elapsedSeconds}
+      />
     </Box>
   );
 }

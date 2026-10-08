@@ -51,7 +51,7 @@ program
     // ── Resolve --resume to a session ID ─────────────────────────────────────
     let resumeSessionId: string | undefined;
     if (opts.resume !== undefined) {
-      const { listSessions, loadSession, listAllSessions, formatSessionEntry } = await import('../core/session/store.js');
+      const { listSessions, formatSessionEntry } = await import('../core/session/store.js');
       const { selectFromList } = await import('../utils/select.js');
       const cwd = process.cwd();
 

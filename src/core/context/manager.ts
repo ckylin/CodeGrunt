@@ -1,4 +1,4 @@
-import type { Message } from '../../types.js';
+import type { Message } from '../../messages.js';
 
 const CHARS_PER_TOKEN = 4;
 

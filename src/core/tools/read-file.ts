@@ -1,81 +1,86 @@
 import { createReadStream, statSync } from 'fs';
 import { createInterface } from 'readline';
-import { resolve } from 'path';
 import type { Tool, ToolResult } from '../../types.js';
+import { resolveToCwd } from './path-utils.js';
+import { formatSize } from './truncate.js';
 
+const MAX_LINES = 2000;
 const MAX_BYTES = 100_000;
-const LINE_RANGE_MAX_BYTES = 200_000;
+// Past this size we stop scanning once the window is full instead of counting every line.
+const COUNT_ALL_MAX_BYTES = 2 * 1024 * 1024;
 
-function readFirstBytes(filePath: string, maxBytes: number): Promise<{ buf: Buffer; totalSize: number }> {
-  return new Promise((res, rej) => {
-    let totalSize = 0;
-    try { totalSize = statSync(filePath).size; } catch { /* ignore */ }
-
-    const chunks: Buffer[] = [];
-    let collected = 0;
-    const stream = createReadStream(filePath, { highWaterMark: 65536 });
-
-    stream.on('data', (chunk: Buffer | string) => {
-      const data: Buffer = typeof chunk === 'string' ? Buffer.from(chunk) : chunk;
-      const remaining = maxBytes - collected;
-      if (remaining <= 0) { stream.destroy(); return; }
-      const slice = data.length <= remaining ? data : data.subarray(0, remaining);
-      chunks.push(slice);
-      collected += slice.length;
-      if (collected >= maxBytes) stream.destroy();
-    });
-
-    stream.on('close', () => res({ buf: Buffer.concat(chunks), totalSize }));
-    stream.on('error', rej);
-  });
+interface ReadWindow {
+  lines: string[];
+  stoppedBy: 'eof' | 'end_line' | 'lines' | 'bytes';
+  totalLines?: number;
+  clippedLineBytes?: number;
 }
 
-/** Count all lines in a file by streaming (no content loaded). */
-function countLines(filePath: string): Promise<number> {
-  return new Promise((res, rej) => {
-    let lineNo = 0;
-    const stream = createReadStream(filePath, { highWaterMark: 65536 });
-    const rl = createInterface({ input: stream, crlfDelay: Infinity });
-    rl.on('line', () => { lineNo++; });
-    rl.on('close', () => res(lineNo));
-    stream.on('error', rej);
-  });
+function clipToBytes(line: string, maxBytes: number): string {
+  const clipped = Buffer.from(line, 'utf-8').subarray(0, maxBytes).toString('utf-8');
+  // A cut inside a multi-byte character decodes to a trailing U+FFFD; drop it.
+  return clipped.charCodeAt(clipped.length - 1) === 0xfffd ? clipped.slice(0, -1) : clipped;
 }
 
-/** Read lines [startLine .. endLine] (1-indexed, inclusive) by streaming, stopping after endLine. */
-function readLinesStreaming(filePath: string, startLine: number, endLine: number): Promise<{ lines: string[]; totalLines: number }> {
+/** Stream lines [start..end], stopping at the line/byte limits. Never loads the whole file. */
+function readWindow(filePath: string, start: number, end: number, countAll: boolean): Promise<ReadWindow> {
   return new Promise((res, rej) => {
-    const selectedLines: string[] = [];
-    let lineNo = 0;
-
     const stream = createReadStream(filePath, { highWaterMark: 65536 });
     const rl = createInterface({ input: stream, crlfDelay: Infinity });
+    const lines: string[] = [];
+    let lineNo = 0;
+    let bytes = 0;
+    let stopped = false;
+    let stoppedBy: ReadWindow['stoppedBy'] = 'eof';
+    let clippedLineBytes: number | undefined;
 
     rl.on('line', (line) => {
       lineNo++;
-      if (lineNo >= startLine && lineNo <= endLine) {
-        selectedLines.push(line);
+      if (stopped || lineNo < start) return;
+      if (lineNo > end) {
+        stopped = true;
+        stoppedBy = 'end_line';
+      } else if (lines.length >= MAX_LINES) {
+        stopped = true;
+        stoppedBy = 'lines';
+      } else {
+        const lineBytes = Buffer.byteLength(line, 'utf-8');
+        if (bytes + lineBytes + (lines.length > 0 ? 1 : 0) > MAX_BYTES) {
+          if (lines.length === 0) {
+            lines.push(clipToBytes(line, MAX_BYTES));
+            clippedLineBytes = lineBytes;
+          }
+          stopped = true;
+          stoppedBy = 'bytes';
+        } else {
+          lines.push(line);
+          bytes += lineBytes + (lines.length > 1 ? 1 : 0);
+        }
       }
-      if (lineNo >= endLine) {
+      if (stopped && !countAll) {
         rl.close();
         stream.destroy();
       }
     });
 
-    rl.on('close', () => res({ lines: selectedLines, totalLines: lineNo }));
+    rl.on('close', () => {
+      const totalKnown = !stopped || countAll;
+      res({ lines, stoppedBy, totalLines: totalKnown ? lineNo : undefined, clippedLineBytes });
+    });
     stream.on('error', rej);
   });
 }
 
 export const readFileTool: Tool = {
+  meta: { readsFiles: true, subagentSafe: true },
   definition: {
     type: 'function',
     function: {
       name: 'read_file',
       description:
-        'Read the contents of a file. Returns the file content as a string. ' +
-        'Large files (>100KB) without a line range return a line-count summary instead of content — use start_line/end_line to read specific sections. ' +
-        'Use start_line and end_line (1-indexed, inclusive) to read a specific range of lines.',
+        `Read the contents of a file. Output is limited to ${MAX_LINES} lines or ${formatSize(MAX_BYTES)} (whichever is hit first); ` +
+        'when a file is cut off, the result ends with the exact start_line to continue from. ' +
+        'Use start_line and end_line (1-indexed, inclusive) to read a specific range; either may be given alone.',
       parameters: {
         type: 'object',
         properties: {
@@ -85,11 +90,11 @@ export const readFileTool: Tool = {
           },
           start_line: {
             type: 'number',
-            description: 'First line to return (1-indexed, inclusive). Requires end_line.',
+            description: 'First line to return (1-indexed, inclusive). Defaults to 1.',
           },
           end_line: {
             type: 'number',
-            description: 'Last line to return (1-indexed, inclusive). Requires start_line.',
+            description: 'Last line to return (1-indexed, inclusive). Defaults to the end of the file (subject to output limits).',
           },
         },
         required: ['path'],
@@ -97,59 +102,36 @@ export const readFileTool: Tool = {
     },
   },
 
-  async execute(args): Promise<ToolResult> {
-    const filePath = resolve(args.path as string);
-    const startLine = args.start_line as number | undefined;
-    const endLine = args.end_line as number | undefined;
-
-    const hasRange = startLine !== undefined && endLine !== undefined;
+  async execute(args, ctx): Promise<ToolResult> {
+    const filePath = resolveToCwd(args.path as string, ctx?.cwd);
+    const startArg = args.start_line as number | undefined;
+    const endArg = args.end_line as number | undefined;
+    const hasRange = startArg !== undefined || endArg !== undefined;
 
     try {
-      let totalSize = 0;
-      try { totalSize = statSync(filePath).size; } catch { /* will surface below */ }
+      const size = statSync(filePath).size;
+      const start = Math.max(1, Math.floor(startArg ?? 1));
+      const end = endArg === undefined ? Infinity : Math.max(start, Math.floor(endArg));
+      const w = await readWindow(filePath, start, end, size <= COUNT_ALL_MAX_BYTES);
+      const total = w.totalLines;
 
-      // ── Line-range path ──
-      if (hasRange) {
-        const start = Math.max(1, startLine!);
-        const end = Math.max(start, endLine!);
-
-        if (totalSize > LINE_RANGE_MAX_BYTES) {
-          // Large file: stream lines until end_line reached
-          const { lines, totalLines } = await readLinesStreaming(filePath, start, end);
-          const header = `[Lines ${start}-${Math.min(end, totalLines)} of ${totalLines}+ total (file >200KB, streamed)]\n`;
-          return { success: true, output: header + lines.join('\n') };
-        } else {
-          // Small enough to load fully
-          const { buf, totalSize: size } = await readFirstBytes(filePath, LINE_RANGE_MAX_BYTES);
-          const allLines = buf.toString('utf-8').split('\n');
-          const totalLines = allLines.length;
-          const sliced = allLines.slice(start - 1, end);
-          const actualEnd = Math.min(end, totalLines);
-          const header = `[Lines ${start}-${actualEnd} of ${totalLines} total]\n`;
-          return { success: true, output: header + sliced.join('\n') };
-        }
+      if (w.lines.length === 0 && start > 1 && total !== undefined && start > total) {
+        return { success: false, output: '', error: `start_line ${start} is beyond the end of ${filePath} (${total} lines total)` };
       }
 
-      // ── No line range: standard byte-read path ──
-      if (totalSize > LINE_RANGE_MAX_BYTES) {
-        // File too large to load even partially — count lines by streaming
-        const totalLines = await countLines(filePath);
-        const kb = Math.round(totalSize / 1024);
-        return {
-          success: true,
-          output: `[File has ${totalLines} lines (~${kb} KB). Use start_line/end_line to read specific sections.]`,
-        };
+      const last = start + w.lines.length - 1;
+      let out = w.lines.join('\n');
+      if (hasRange && w.lines.length > 0) {
+        out = `[Lines ${start}-${last}${total !== undefined ? ` of ${total} total` : ''}]\n${out}`;
       }
 
-      const { buf, totalSize: size } = await readFirstBytes(filePath, MAX_BYTES);
-      const content = buf.toString('utf-8');
-      if (size > MAX_BYTES) {
-        return {
-          success: true,
-          output: content + `\n\n[File truncated — ${size} total bytes, showing first ${MAX_BYTES}]`,
-        };
+      if (w.clippedLineBytes !== undefined) {
+        out += `\n\n[Line ${start} is ${formatSize(w.clippedLineBytes)}, exceeds the ${formatSize(MAX_BYTES)} limit; output was truncated to the first ${formatSize(MAX_BYTES)} of that line. Use start_line=${start + 1} to continue after it.]`;
+      } else if (w.stoppedBy === 'lines' || w.stoppedBy === 'bytes') {
+        const limit = w.stoppedBy === 'bytes' ? ` (${formatSize(MAX_BYTES)} limit)` : '';
+        out += `\n\n[Output truncated: showing lines ${start}-${last}${total !== undefined ? ` of ${total}` : ''}${limit}. Use start_line=${last + 1} to continue.]`;
       }
-      return { success: true, output: content };
+      return { success: true, output: out };
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       return { success: false, output: '', error: `Failed to read ${filePath}: ${message}` };

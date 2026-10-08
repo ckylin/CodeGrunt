@@ -99,7 +99,7 @@ export async function createSnapshot(cwd: string, taskSummary: string): Promise<
     const message = `snapshot: ${timestamp} — ${summary}`;
 
     // Commit without a user identity (uses side git config)
-    const hash = await sideGit(cwd, [
+    await sideGit(cwd, [
       '-c', 'user.name=codegrunt',
       '-c', 'user.email=codegrunt@local',
       'commit', '-m', message,

@@ -18,6 +18,7 @@ import { getLogger } from '../observability/logger.js';
 import { getDefaultMetrics } from '../observability/metrics.js';
 import { getDefaultEventBus, type LLMRequestEvent } from '../events/bus.js';
 import { getToolDefinitions } from '../tools/registry.js';
+import { fastModelFor } from '../../providers/model-policy.js';
 
 const log = getLogger('planner');
 
@@ -40,7 +41,9 @@ function buildPlannerPrompt(language: 'zh' | 'en', task: string, availableTools:
       "description": "这一步要做什么",
       "toolsHint": ["可能需要用到的工具"],
       "expectedOutcome": "期望的结果",
-      "verification": "如何验证这一步是否完成正确"
+      "verification": "如何验证这一步是否完成正确",
+      "parallelizable": false,
+      "targetFiles": ["这一步会读写的文件路径"]
     }
   ]
 }
@@ -56,6 +59,7 @@ function buildPlannerPrompt(language: 'zh' | 'en', task: string, availableTools:
 6. 如果任务很简单（单文件修改），1-2 步即可
 7. **"更新多个文件"类任务**：按文件分步（每步读+写一个文件），不要按"分析→执行"分步。分析阶段会消耗大量 token，导致执行阶段上下文不足。
 8. **每个写入步骤**必须在同一步内完成读取和写入，不要把读取和写入拆成两步。
+9. **并行标记**：如果多个步骤各自读写不同文件、互不依赖（不需要等待彼此的结果），把这些步骤标记为 \`"parallelizable": true\`，并在 \`targetFiles\` 中列出该步骤会读写的文件路径。默认是 \`false\`（串行执行）。只有当步骤之间确实没有依赖关系时才标记为 true——有疑问时优先选择 false。
 
 ## 可用工具
 ${availableTools}
@@ -79,7 +83,9 @@ Place your plan in a JSON code block:
       "description": "What this step does",
       "toolsHint": ["tools likely needed"],
       "expectedOutcome": "Expected result",
-      "verification": "How to verify this step was done correctly"
+      "verification": "How to verify this step was done correctly",
+      "parallelizable": false,
+      "targetFiles": ["file paths this step reads/writes"]
     }
   ]
 }
@@ -95,6 +101,7 @@ Place your plan in a JSON code block:
 6. Simple tasks (single file edit) can be 1-2 steps
 7. **"Update multiple files" tasks**: split by file (each step reads+writes one file). Do NOT split into "analyze then execute" — analysis consumes too many tokens, leaving no context for writing.
 8. **Each write step** must include both reading and writing in the same step.
+9. **Parallel marking**: if multiple steps each read/write different files and have no dependency on each other's results, mark them \`"parallelizable": true\` and list the files each step touches in \`targetFiles\`. Default is \`false\` (sequential). Only mark true when there is genuinely no dependency between steps — when in doubt, use false.
 
 ## Available Tools
 ${availableTools}
@@ -110,8 +117,7 @@ ${task}`;
 // ── Light model selection ─────────────────────────────────────────────────
 // Planning outputs structured JSON — flash is sufficient and much cheaper.
 function selectLightModel(configuredModel: string): string {
-  if (configuredModel.startsWith('deepseek-')) return 'deepseek-v4-flash';
-  return configuredModel;
+  return fastModelFor(configuredModel);
 }
 
 // ── Plan Parsing ─────────────────────────────────────────────────────────
@@ -146,6 +152,8 @@ function parsePlan(raw: string, task: string, validToolNames: Set<string>): Task
             toolsHint: filteredHints,
             expectedOutcome: String(s.expectedOutcome ?? 'Complete the step'),
             verification: String(s.verification ?? 'Step completed'),
+            parallelizable: s.parallelizable === true,
+            targetFiles: Array.isArray(s.targetFiles) ? s.targetFiles.map(String) : [],
           };
         });
         parsed.reasoning = parsed.reasoning ?? '';

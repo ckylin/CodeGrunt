@@ -17,12 +17,17 @@
 //   - Blocks the calling tool call until the sub-agent produces a final
 //     text answer or exhausts its iteration budget.
 //
-// Ref: src/core/tools/agent_open.ts (the tool wrapper exposed to the model)
+// Ref: src/core/tools/agent-open.ts (the tool wrapper exposed to the model)
 
-import type { LLMProvider, Message, ToolCallMessage, ToolDefinition } from '../../types.js';
-import { getToolDefinitions } from '../tools/registry.js';
-import { executeToolCall } from '../pipeline/stages/process-tools-helpers.js';
+import type { Message, ToolCallMessage, ToolDefinition } from '../../types.js';
+import { getToolDefinitions, toolNamesWithTrait } from '../tools/registry.js';
+import {
+  registerSubagentRunners,
+  type SubagentResult, type SubagentRunOptions, type ConcurrentSubagentOptions, type ConcurrentSubagentResult,
+} from './subagent-runtime.js';
+import { executeToolCall } from '../tools/tool-executor.js';
 import { getLogger } from '../observability/logger.js';
+import { fastModelFor } from '../../providers/model-policy.js';
 import { getSubagentCache, clearSubagentCache, getSubagentCacheStats } from './subagent-cache.js';
 
 const log = getLogger('subagent');
@@ -34,75 +39,34 @@ const DEFAULT_SUBAGENT_TIMEOUT_MS = 120_000;
 /** Maximum concurrent sub-agents */
 const MAX_CONCURRENT_SUBAGENTS = 10;
 
-/** Tools available to sub-agents — read-only, no confirm-gated operations. */
-export const SUBAGENT_TOOL_NAMES = new Set([
-  'read_file', 'search_files', 'list_directory', 'code_search', 'web_search', 'memory_read',
-]);
-
-export interface SubagentResult {
-  success: boolean;
-  output: string;
-  toolCallCount: number;
-  iterations: number;
-  error?: string;
-  /** Time elapsed (ms) */
-  durationMs?: number;
+/** Tools available to sub-agents: those declaring `subagentSafe` (read-only, no confirm-gated operations). */
+export function getSubagentToolNames(): Set<string> {
+  return toolNamesWithTrait('subagentSafe');
 }
 
-export interface SubagentRunOptions {
-  task: string;
-  cwd: string;
-  provider: LLMProvider;
-  model: string;
-  /** Replaces the default read-only research-agent system prompt (used by Skills v2 subagent mode). */
-  systemOverride?: string;
-  signal?: AbortSignal;
-  /** Timeout in milliseconds (default: 120000) */
-  timeoutMs?: number;
-  /** When true, enables result caching by input hash (default: false) */
-  useCache?: boolean;
-  /** Explicitly disable the automatic flash model downgrade (default: false) */
-  noModelDowngrade?: boolean;
+export type {
+  SubagentResult, SubagentRunOptions, ConcurrentSubagentOptions, ConcurrentSubagentResult,
+} from './subagent-runtime.js';
+export { setSubagentContext, getSubagentContext } from './subagent-runtime.js';
+
+function getSubagentToolDefinitions(allowedTools: Set<string>): ToolDefinition[] {
+  return getToolDefinitions().filter(d => allowedTools.has(d.function.name));
 }
 
-export interface ConcurrentSubagentOptions {
-  tasks: SubagentRunOptions[];
-  /** Maximum concurrent sub-agents (default: 10) */
-  concurrency?: number;
-  /** Global timeout for all sub-agents to complete (default: 120000) */
-  timeoutMs?: number;
-  /** When true, partial failures are allowed — results contain both successes and failures */
-  allowPartialFailure?: boolean;
-  /** Signal shared across all sub-agents */
-  signal?: AbortSignal;
-}
+function buildSubagentSystemPrompt(cwd: string, allowedTools: Set<string>): string {
+  const toolList = Array.from(allowedTools).join(', ');
+  return `You are a sub-agent spawned by a coding agent to investigate or execute a focused task in isolation.
 
-export interface ConcurrentSubagentResult {
-  results: SubagentResult[];
-  totalTimeMs: number;
-  succeeded: number;
-  failed: number;
-  timedOut: number;
-}
-
-function getSubagentToolDefinitions(): ToolDefinition[] {
-  return getToolDefinitions().filter(d => SUBAGENT_TOOL_NAMES.has(d.function.name));
-}
-
-function buildSubagentSystemPrompt(cwd: string): string {
-  return `You are a read-only research sub-agent spawned by a coding agent to investigate a focused question in isolation.
-
-- Available tools: read_file, search_files, list_directory, code_search, web_search, memory_read. You have NO access to write_file, edit_file, or execute_shell — any attempt to use them will fail.
+- Available tools: ${toolList}. Any attempt to use a tool outside this list will fail.
 - Working directory: ${cwd}
-- There is no user in this conversation — only the calling agent waiting for your final answer. Do not ask questions; investigate with the tools available and reach a conclusion.
+- There is no user in this conversation — only the calling agent waiting for your final answer. Do not ask questions; investigate/execute with the tools available and reach a conclusion.
 - When you have enough information, stop calling tools and reply with a concise, information-dense text answer.`;
 }
 
 /** Downgrade to the cheapest tier for sub-agent research — same policy as Intentor's classification calls. */
 function selectSubagentModel(configuredModel: string, noDowngrade?: boolean): string {
   if (noDowngrade) return configuredModel;
-  if (configuredModel.startsWith('deepseek-')) return 'deepseek-v4-flash';
-  return configuredModel;
+  return fastModelFor(configuredModel);
 }
 
 /**
@@ -120,7 +84,8 @@ export async function runSubagent(options: SubagentRunOptions): Promise<Subagent
   const startTime = Date.now();
   const timeoutMs = options.timeoutMs ?? DEFAULT_SUBAGENT_TIMEOUT_MS;
   const model = selectSubagentModel(options.model, options.noModelDowngrade);
-  const toolDefs = getSubagentToolDefinitions();
+  const allowedTools = options._allowedTools ?? getSubagentToolNames();
+  const toolDefs = getSubagentToolDefinitions(allowedTools);
 
   // ── Cache check ──────────────────────────────────────────────────────────
   if (options.useCache) {
@@ -134,7 +99,7 @@ export async function runSubagent(options: SubagentRunOptions): Promise<Subagent
   }
 
   const messages: Message[] = [
-    { role: 'system', content: options.systemOverride ?? buildSubagentSystemPrompt(cwd) },
+    { role: 'system', content: options.systemOverride ?? buildSubagentSystemPrompt(cwd, allowedTools) },
     { role: 'user', content: task },
   ];
 
@@ -212,11 +177,11 @@ export async function runSubagent(options: SubagentRunOptions): Promise<Subagent
 
         for (const tc of toolCalls) {
           toolCallCount++;
-          if (!SUBAGENT_TOOL_NAMES.has(tc.name)) {
+          if (!allowedTools.has(tc.name)) {
             messages.push({
               role: 'tool',
               tool_call_id: tc.id,
-              content: `Error: tool "${tc.name}" is not available to sub-agents (read-only tools only).`,
+              content: `Error: tool "${tc.name}" is not available to this sub-agent.`,
             });
             continue;
           }
@@ -435,25 +400,8 @@ function combineAbortSignals(...signals: AbortSignal[]): { signal: AbortSignal; 
   };
 }
 
-// ── Module-level context (set once per main agent turn) ────────────────────
-// Tools only receive `args: Record<string, unknown>` — they have no direct
-// access to the provider/model configured for the current session. Mirrors
-// the setTrustMode() pattern in process-tools-helpers.ts.
-
-interface SubagentContext {
-  provider: LLMProvider;
-  model: string;
-}
-
-let activeContext: SubagentContext | null = null;
-
-export function setSubagentContext(provider: LLMProvider, model: string): void {
-  activeContext = { provider, model };
-}
-
-export function getSubagentContext(): SubagentContext | null {
-  return activeContext;
-}
+// Make the runners reachable from the agent_open tool without it importing this module.
+registerSubagentRunners({ runSubagent, runSubagentsConcurrent });
 
 // Re-export cache utilities
 export { clearSubagentCache, getSubagentCacheStats };

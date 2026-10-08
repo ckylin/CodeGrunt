@@ -12,7 +12,7 @@ import { getLogger } from '../../observability/logger.js';
 import { detectSystemLanguage } from '../../../utils/locale.js';
 import { createHash } from 'crypto';
 import { platform } from 'os';
-import { write as chWrite } from '../../../cli/ink/output-channel.js';
+import { write as chWrite } from '../../output/output-channel.js';
 
 const log = getLogger('stage:prepare-context');
 

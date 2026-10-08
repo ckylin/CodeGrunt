@@ -13,7 +13,7 @@
 
 import type { LLMProvider, Message } from '../../types.js';
 import type { PlanStep, EvaluationResult } from '../pipeline/types.js';
-import { WRITE_TOOL_NAMES } from '../pipeline/types.js';
+import { toolHasTrait } from '../tools/registry.js';
 import { getLogger } from '../observability/logger.js';
 import { getDefaultMetrics } from '../observability/metrics.js';
 import { runDiagnostics } from '../lsp/checker.js';
@@ -193,7 +193,7 @@ function structuralChecks(
   }
 
   // Check 3: Blind write — warning only, don't block progress
-  const hasWrite = currentTurnToolCalls.some(tc => WRITE_TOOL_NAMES.has(tc.name));
+  const hasWrite = currentTurnToolCalls.some(tc => toolHasTrait(tc.name, 'writesFiles'));
   if (hasWrite && !sessionHasRead) {
     issues.push('写入操作前未读取文件，存在凭空编造代码的风险');
     suggestions.push('建议先用 read_file 了解现有代码再编辑');

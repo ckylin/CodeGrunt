@@ -57,6 +57,7 @@ export const memoryWriteTool: Tool = {
 // ── memory_read ───────────────────────────────────────────────────────────────
 
 export const memoryReadTool: Tool = {
+  meta: { subagentSafe: true },
   definition: {
     type: 'function',
     function: {

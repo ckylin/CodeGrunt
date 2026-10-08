@@ -1,13 +1,16 @@
 import { createReadStream, statSync } from 'fs';
 import { readdir } from 'fs/promises';
-import { join, resolve, extname } from 'path';
+import { join, extname } from 'path';
 import { createInterface } from 'readline';
 import type { Tool, ToolResult } from '../../types.js';
+import { resolveToCwd } from './path-utils.js';
+import { truncateLine } from './truncate.js';
+import { SKIP_DIRS_DEFAULT as SKIP_DIRS } from '../../utils/fs-ignore.js';
 
-const MAX_RESULTS = 50;
+const DEFAULT_RESULTS = 50;
+const MAX_RESULTS_CAP = 500;
 const MAX_FILE_BYTES = 512 * 1024; // 512 KB — skip binary/large files
 const CONCURRENCY = 32; // parallel file reads — higher since we stream
-const SKIP_DIRS = new Set(['node_modules', '.git', 'dist', '.next', '__pycache__', '.cache']);
 // File extensions likely to be text — everything else is skipped for safety/speed
 const TEXT_EXTS = new Set([
   '.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs', '.mts', '.cts',
@@ -29,7 +32,8 @@ const TEXT_EXTS = new Set([
 ]);
 
 /** Stream-search a single file; returns up to maxMatches line snippets. Stops reading as soon as limit is hit. */
-function searchFileStream(absPath: string, pattern: string, relPath: string, maxMatches: number, regex?: RegExp): Promise<string[]> {
+function searchFileStream(absPath: string, pattern: string, relPath: string, maxMatches: number, regex?: RegExp, ignoreCase = false): Promise<string[]> {
+  const needle = ignoreCase ? pattern.toLowerCase() : pattern;
   return new Promise((res) => {
     let size = 0;
     try { size = statSync(absPath).size; } catch { res([]); return; }
@@ -43,9 +47,9 @@ function searchFileStream(absPath: string, pattern: string, relPath: string, max
 
     rl.on('line', (line) => {
       lineNo++;
-      const hit = regex ? regex.test(line) : line.includes(pattern);
+      const hit = regex ? regex.test(line) : (ignoreCase ? line.toLowerCase() : line).includes(needle);
       if (hit) {
-        matches.push(`${relPath}:${lineNo}: ${line.trim()}`);
+        matches.push(`${relPath}:${lineNo}: ${truncateLine(line.trim()).text}`);
         if (matches.length >= maxMatches) {
           rl.close();
           stream.destroy();
@@ -59,11 +63,12 @@ function searchFileStream(absPath: string, pattern: string, relPath: string, max
 }
 
 export const searchFilesTool: Tool = {
+  meta: { readsFiles: true, subagentSafe: true },
   definition: {
     type: 'function',
     function: {
       name: 'search_files',
-      description: 'Search for a pattern in files. Returns matching file paths and line snippets. Supports regex search via is_regex:true. Set include_hidden:true to also search files and directories starting with ".".',
+      description: `Search for a pattern in files. Returns matching file paths and line snippets (long lines are truncated to 500 chars). Supports regex search via is_regex:true and case-insensitive search via ignore_case:true. Returns up to ${DEFAULT_RESULTS} matches by default (use limit for more, max ${MAX_RESULTS_CAP}). Set include_hidden:true to also search files and directories starting with ".".`,
       parameters: {
         type: 'object',
         properties: {
@@ -87,18 +92,28 @@ export const searchFilesTool: Tool = {
             type: 'boolean',
             description: 'If true, include files and directories whose names start with "." (default false)',
           },
+          ignore_case: {
+            type: 'boolean',
+            description: 'If true, match case-insensitively (default false)',
+          },
+          limit: {
+            type: 'number',
+            description: `Maximum number of matches to return (default ${DEFAULT_RESULTS}, max ${MAX_RESULTS_CAP})`,
+          },
         },
         required: ['pattern'],
       },
     },
   },
 
-  async execute(args): Promise<ToolResult> {
+  async execute(args, ctx): Promise<ToolResult> {
     const pattern = args.pattern as string;
-    const searchPath = resolve((args.path as string | undefined) ?? '.');
+    const searchPath = resolveToCwd((args.path as string | undefined) ?? '.', ctx?.cwd);
     const filePattern = args.file_pattern as string | undefined;
     const isRegex = !!(args.is_regex as boolean | undefined);
     const includeHidden = !!(args.include_hidden as boolean | undefined);
+    const ignoreCase = !!(args.ignore_case as boolean | undefined);
+    const MAX_RESULTS = Math.min(Math.max(1, Math.floor((args.limit as number | undefined) ?? DEFAULT_RESULTS)), MAX_RESULTS_CAP);
 
     if (!pattern) {
       return { success: false, output: '', error: 'Missing required parameter "pattern"' };
@@ -107,7 +122,7 @@ export const searchFilesTool: Tool = {
     let regex: RegExp | undefined;
     if (isRegex) {
       try {
-        regex = new RegExp(pattern);
+        regex = new RegExp(pattern, ignoreCase ? 'i' : '');
       } catch (e) {
         const message = e instanceof Error ? e.message : String(e);
         return { success: false, output: '', error: `Invalid regex pattern: ${message}` };
@@ -115,8 +130,8 @@ export const searchFilesTool: Tool = {
     }
 
     const results: string[] = [];
-    let pending: Array<{ root: string; relDir: string }> = [{ root: searchPath, relDir: '' }];
-    let fileQueue: Array<{ root: string; relPath: string }> = [];
+    const pending: Array<{ root: string; relDir: string }> = [{ root: searchPath, relDir: '' }];
+    const fileQueue: Array<{ root: string; relPath: string }> = [];
 
     // ── Phase 1: collect all candidate files (parallel BFS) ──
     try {
@@ -162,11 +177,12 @@ export const searchFilesTool: Tool = {
     // ── Phase 2: stream-search files in parallel batches; stop early when full ──
     try {
       while (fileQueue.length > 0 && results.length < MAX_RESULTS) {
+        if (ctx?.signal?.aborted) return { success: false, output: results.join('\n'), error: 'Search aborted' };
         const remaining = MAX_RESULTS - results.length;
         const batch = fileQueue.splice(0, CONCURRENCY);
         const batchResults = await Promise.all(
           batch.map(({ root, relPath }) =>
-            searchFileStream(join(root, relPath), pattern, relPath, Math.min(3, remaining), regex)
+            searchFileStream(join(root, relPath), pattern, relPath, Math.min(3, remaining), regex, ignoreCase)
           )
         );
         for (const matches of batchResults) {
@@ -190,7 +206,7 @@ export const searchFilesTool: Tool = {
     return {
       success: true,
       output: results.join('\n') +
-        (truncated ? `\n… (showing first ${MAX_RESULTS} matches, more files remain)` : ''),
+        (truncated ? `\n[Showing first ${MAX_RESULTS} matches, more files remain. Use limit=${Math.min(MAX_RESULTS * 2, MAX_RESULTS_CAP)} or narrow the pattern/path.]` : ''),
     };
   },
 };

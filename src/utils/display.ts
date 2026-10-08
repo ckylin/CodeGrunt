@@ -2,7 +2,7 @@ import chalk from 'chalk';
 import type { TaskPlan, EvaluationResult, IntentResult } from '../core/pipeline/types.js';
 import { ACCENT, muted } from './constants.js';
 import { formatErrorForDisplay } from '../core/errors.js';
-import { write as chWrite } from '../cli/ink/output-channel.js';
+import { write as chWrite } from '../core/output/output-channel.js';
 
 const blue  = (s: string) => chalk.hex(ACCENT)(s);
 const danger  = chalk.red;

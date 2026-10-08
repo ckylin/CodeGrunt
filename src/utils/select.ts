@@ -1,14 +1,10 @@
 import React from 'react';
 import { render } from 'ink';
 import { ListPicker } from '../cli/ink/ListPicker.js';
-import { getPickerHandler } from '../cli/ink/output-channel.js';
+import { getPickerHandler } from '../core/output/output-channel.js';
+import type { SelectorItem } from '../cli/ink/types.js';
 
-export interface SelectorItem {
-  value: string;
-  label: string;
-  desc?: string;
-  kind?: 'builtin' | 'skill';
-}
+export type { SelectorItem };
 
 export async function selectFromList(
   title: string,

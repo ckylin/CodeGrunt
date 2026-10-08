@@ -16,7 +16,7 @@ import {
 } from '../../utils/display.js';
 import { MarkdownRenderer } from '../../utils/markdown.js';
 import { isReasonerModel } from '../../config.js';
-import { setLiveTextDirect, commitLiveText, hasSink } from '../../cli/ink/output-channel.js';
+import { setLiveTextDirect, commitLiveText, hasSink } from '../output/output-channel.js';
 
 // ── Pipeline imports ────────────────────────────────────────────────────
 import {

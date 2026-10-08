@@ -1,7 +1,14 @@
-import type { Skill } from '../skills.js';
-import type { SelectorItem } from '../../utils/select.js';
+import type { Skill } from '../../types.js';
 
-export type { Skill, SelectorItem };
+export type { Skill };
+
+/** One row of a ListPicker / selectFromList menu. */
+export interface SelectorItem {
+  value: string;
+  label: string;
+  desc?: string;
+  kind?: 'builtin' | 'skill';
+}
 
 export interface InputResult {
   text: string;

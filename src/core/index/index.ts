@@ -25,6 +25,7 @@ import { createHash } from 'crypto';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
 import { getLogger } from '../observability/logger.js';
+import { SKIP_DIRS_INDEX as SKIP_DIRS } from '../../utils/fs-ignore.js';
 import {
   buildSemanticIndex as buildTFIDFIndex,
   semanticSearch as tfidfSearch,
@@ -43,12 +44,8 @@ const BUILD_TIMEOUT_MS = 60_000;
 
 // ── Types ─────────────────────────────────────────────────────────────────
 
-export interface CodeSymbol {
-  name: string;
-  kind: 'function' | 'class' | 'interface' | 'type' | 'export' | 'const' | 'variable';
-  file: string;
-  line: number;
-}
+import type { CodeSymbol } from './types.js';
+export type { CodeSymbol };
 
 export interface CodeIndex {
   builtAt: string;
@@ -158,7 +155,6 @@ const PATTERNS: Array<{ lang: string[]; exts: string[]; pattern: string; kind: C
 ];
 
 const INDEXABLE_EXTS = new Set(['.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs', '.py', '.go', '.rs']);
-const SKIP_DIRS = new Set(['node_modules', '.git', 'dist', 'build', '.codegrunt']);
 
 /** Recursively walk cwd collecting indexable source files, skipping common noise dirs. */
 async function walkFiles(cwd: string, dir = '.', out: string[] = []): Promise<string[]> {

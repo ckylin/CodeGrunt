@@ -1,6 +1,7 @@
 import { readFile, readdir, stat } from 'fs/promises';
 import { resolve, relative, join } from 'path';
 import chalk from 'chalk';
+import { SKIP_DIRS_DEFAULT as SKIP_DIRS } from '../utils/fs-ignore.js';
 
 export interface AtReference {
   raw: string;       // the original @token in the input
@@ -11,7 +12,6 @@ export interface AtReference {
 
 const MAX_FILE_CHARS = 8000;
 const MAX_DIR_FILES = 20;
-const SKIP_DIRS = new Set(['node_modules', '.git', 'dist', '.next', '__pycache__', '.cache']);
 
 // Match @something — file path, directory, or URL
 // Stops at whitespace. Supports quoted paths: @"path with spaces"
@@ -111,7 +111,6 @@ async function collectFiles(root: string, dir: string, lines: string[], depth = 
     if (lines.length >= MAX_DIR_FILES) break;
     if (entry.name.startsWith('.')) continue;
     const full = join(dir, entry.name);
-    const rel = relative(root, full);
     const indent = '  '.repeat(depth);
     if (entry.isDirectory()) {
       if (SKIP_DIRS.has(entry.name)) continue;

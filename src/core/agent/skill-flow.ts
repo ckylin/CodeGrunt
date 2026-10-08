@@ -13,10 +13,10 @@ import { ContextManager } from '../context/manager.js';
 import { getDefaultMetrics } from '../observability/metrics.js';
 import { getLogger } from '../observability/logger.js';
 import type { IntentResult } from '../pipeline/types.js';
-import { MAX_ITERATIONS, displayToolCalls, runGenerator } from './generator.js';
+import { runToolLoop } from './tool-loop.js';
 import { PrepareContextStage } from '../pipeline/stages/prepare-context.js';
 import { runSubagent } from './subagent.js';
-import { write as chWrite } from '../../cli/ink/output-channel.js';
+import { write as chWrite } from '../output/output-channel.js';
 
 const log = getLogger('agent:skill-flow');
 
@@ -27,7 +27,7 @@ export async function runSkillFlow(
   skill: NonNullable<IntentResult['matchedSkill']>,
   metrics: ReturnType<typeof getDefaultMetrics>,
 ): Promise<{ responseLength: number }> {
-  const { onToolCall, onToolResult, signal } = options;
+  const { signal } = options;
 
   log.info('Skill flow', { skill: skill.name, mode: skill.mode ?? 'inline' });
   chWrite(chalk.gray(`  skill: ${skill.name}\n`));
@@ -58,24 +58,9 @@ export async function runSkillFlow(
     systemPromptOverride: skill.system,
   };
 
-  const prepareStage = new PrepareContextStage();
-  const genResult = await runGenerator(context, skillOptions, lang, 0, undefined, false, prepareStage);
-
-  if (genResult.userRejected) { log.info('Skill flow ended — user rejected'); return { responseLength: 0 }; }
-  if (genResult.error) throw genResult.error;
-
-  displayToolCalls(genResult.pipeCtx, onToolCall, onToolResult);
-
-  let iteration = 1;
-  let current = genResult;
-  while (!current.done && current.pipeCtx.toolCalls.length > 0 && iteration < MAX_ITERATIONS) {
-    if (signal?.aborted) break;
-    current = await runGenerator(context, skillOptions, lang, iteration, undefined, false, prepareStage);
-    if (current.userRejected) break;
-    if (current.error) throw current.error;
-    displayToolCalls(current.pipeCtx, onToolCall, onToolResult);
-    iteration++;
-  }
+  const { last: current, iterations: iteration, rejectedAtStart } =
+    await runToolLoop(context, skillOptions, lang, new PrepareContextStage());
+  if (rejectedAtStart) { log.info('Skill flow ended — user rejected'); return { responseLength: 0 }; }
 
   log.info('Skill flow complete', { skill: skill.name, iterations: iteration });
   metrics.increment('agent.skill_turns');

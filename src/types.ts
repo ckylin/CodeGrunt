@@ -1,37 +1,25 @@
-// ── Message types (OpenAI-compatible) ──────────────────────────────────────
+import type { Message } from './messages.js';
 
-export interface TextMessage {
-  role: 'system' | 'user' | 'assistant';
+export type { TextMessage, ToolCallMessage, ToolResultMessage, Message, ToolCall } from './messages.js';
+
+// ── Skills ──────────────────────────────────────────────────────────────────
+// Defined here (not in cli/skills.ts) because the agent core consumes skills.
+
+export interface Skill {
+  name: string;
+  description?: string;
+  /** Optional system prompt override. When set, this replaces the default
+   *  coding-assistant identity for the skill session, allowing the skill
+   *  to define a completely different role (e.g. "You are a BaZi master"). */
+  system?: string;
+  /** 'subagent' routes this skill through the isolated read-only sub-agent
+   *  loop (src/core/agent/subagent.ts) instead of the main chat loop —
+   *  useful for research-style skills that shouldn't touch write/edit/shell
+   *  tools or pollute the caller's conversation history. Defaults to 'inline'. */
+  mode?: 'inline' | 'subagent';
   content: string;
-  /** DeepSeek reasoning / chain-of-thought — persisted across turns for continuity */
-  reasoning_content?: string;
-}
-
-export interface ToolCallMessage {
-  role: 'assistant';
-  content: null;
-  tool_calls: ToolCall[];
-  /** DeepSeek reasoning that led to the tool calls */
-  reasoning_content?: string;
-}
-
-export interface ToolResultMessage {
-  role: 'tool';
-  tool_call_id: string;
-  content: string;
-}
-
-export type Message = TextMessage | ToolCallMessage | ToolResultMessage;
-
-// ── Tool call structures ────────────────────────────────────────────────────
-
-export interface ToolCall {
-  id: string;
-  type: 'function';
-  function: {
-    name: string;
-    arguments: string;
-  };
+  source: 'project' | 'global';
+  file: string; // relative file name
 }
 
 // ── Streaming chunks ────────────────────────────────────────────────────────
@@ -62,9 +50,29 @@ export interface ToolResult {
   confirmDurationMs?: number;
 }
 
+export interface ToolContext {
+  /** Aborts long-running work (shell commands, searches) on Ctrl+C / Esc */
+  signal?: AbortSignal;
+  /** Base directory for resolving relative paths; defaults to process.cwd() */
+  cwd?: string;
+}
+
+/** Declarative traits the pipeline reads instead of keeping per-feature tool-name lists. */
+export interface ToolMeta {
+  /** Reads project files; counts as "looked first" for blind-write detection. */
+  readsFiles?: boolean;
+  /** Creates or modifies files on disk. */
+  writesFiles?: boolean;
+  /** Needs user confirmation and is blocked in plan mode. */
+  destructive?: boolean;
+  /** Safe to hand to read-only sub-agents. */
+  subagentSafe?: boolean;
+}
+
 export interface Tool {
   definition: ToolDefinition;
-  execute(args: Record<string, unknown>): Promise<ToolResult>;
+  meta?: ToolMeta;
+  execute(args: Record<string, unknown>, ctx?: ToolContext): Promise<ToolResult>;
 }
 
 // ── Provider interface ──────────────────────────────────────────────────────
@@ -181,7 +189,7 @@ export interface AgentRunOptions {
    *  Used by skills to define a completely different role/identity. */
   systemPromptOverride?: string;
   /** Loaded skills — passed to Intentor for automatic skill routing. */
-  skills?: import('./cli/skills.js').Skill[];
+  skills?: Skill[];
   /** Session summary from previous compact — injected into system prompt at startup. */
   memorySummary?: string;
   /** Formatted user habit preferences — injected into system prompt above session summary. */

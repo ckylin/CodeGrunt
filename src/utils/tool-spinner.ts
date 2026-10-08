@@ -6,7 +6,7 @@
 // indicators while tool calls are executing.
 
 import chalk from 'chalk';
-import { write as chWrite, setLiveTool, hasSink } from '../cli/ink/output-channel.js';
+import { write as chWrite, setLiveTool, hasSink } from '../core/output/output-channel.js';
 
 const muted = chalk.gray;
 const successColor = chalk.green;

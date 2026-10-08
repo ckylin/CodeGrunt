@@ -1,11 +1,16 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { Box, Text, useInput } from 'ink';
 import chalk from 'chalk';
-import stringWidth from 'string-width';
 import { accessSync } from 'fs';
 import { join } from 'path';
 import { ACCENT } from '../../utils/constants.js';
 import { Dropdown } from './Dropdown.js';
+import { useTerminalSize } from './useTerminalSize.js';
+import {
+  lineStart, lineEnd, cursorLineIndex, moveVertical, wordLeft, wordRight,
+  deleteWordBefore, deleteToLineStart, deleteToLineEnd,
+  visibleWindow, maxInputRows, buildRule,
+} from './editing.js';
 import { createHistoryController, saveHistoryEntry } from './useHistory.js';
 import { getAutocompleteItems, findAtTokenAtCursor } from './useAutocomplete.js';
 import {
@@ -31,6 +36,7 @@ export function PromptInput({
   busy = false,
   onCancelBusy,
 }: PromptInputProps): React.ReactElement {
+  const { columns, rows } = useTerminalSize();
   const [input, setInput] = useState('');
   const [cursor, setCursor] = useState(0);
   const [dropdownIndex, setDropdownIndex] = useState(0);
@@ -70,6 +76,11 @@ export function PromptInput({
     cursorRef.current = nextCursor;
     setInput(nextInput);
     setCursor(nextCursor);
+  };
+
+  const moveCursor = (next: number) => {
+    cursorRef.current = next;
+    setCursor(next);
   };
 
   const setSuppress = (value: boolean) => {
@@ -161,43 +172,59 @@ export function PromptInput({
       return;
     }
 
+    // Word jumps: Alt/Ctrl+Left/Right (modified arrows) and Alt+b / Alt+f
+    // (what macOS terminals send for Option+arrow).
+    if (key.leftArrow && (key.meta || key.ctrl)) { moveCursor(wordLeft(inp, cur)); return; }
+    if (key.rightArrow && (key.meta || key.ctrl)) { moveCursor(wordRight(inp, cur)); return; }
+    if (key.meta && char === 'b') { moveCursor(wordLeft(inp, cur)); return; }
+    if (key.meta && char === 'f') { moveCursor(wordRight(inp, cur)); return; }
+
     // Left arrow — move cursor left
     if (key.leftArrow) {
-      cursorRef.current = Math.max(0, cur - 1);
-      setCursor(cursorRef.current);
+      moveCursor(Math.max(0, cur - 1));
       return;
     }
 
     // Right arrow — move cursor right
     if (key.rightArrow) {
-      cursorRef.current = Math.min(inp.length, cur + 1);
-      setCursor(cursorRef.current);
+      moveCursor(Math.min(inp.length, cur + 1));
       return;
     }
 
-    // Arrow up
+    // Arrow up — dropdown, else the previous line of a multi-line entry,
+    // else older history (only from the first line, like a shell).
     if (key.upArrow) {
       if (dropdownVisible && !suppressDropdownRef.current) {
-        setDropdownIndex(i => Math.max(0, i - 1));
-      } else {
-        const prev = historyCtrl.current.navigateUp(inp);
-        apply(prev, prev.length);
-        // Recalled text may itself start with '/' or contain '@' — don't let
-        // it pop the dropdown and steal the next up/down press.
-        setSuppress(true);
+        setDropdownIndex(i => (i <= 0 ? dropdownItems.length - 1 : i - 1));
+        return;
       }
+      const up = moveVertical(inp, cur, -1);
+      if (up !== null) {
+        moveCursor(up);
+        return;
+      }
+      const prev = historyCtrl.current.navigateUp(inp);
+      apply(prev, prev.length);
+      // Recalled text may itself start with '/' or contain '@' — don't let
+      // it pop the dropdown and steal the next up/down press.
+      setSuppress(true);
       return;
     }
 
-    // Arrow down
+    // Arrow down — mirror of up: dropdown, next line, then newer history.
     if (key.downArrow) {
       if (dropdownVisible && !suppressDropdownRef.current) {
-        setDropdownIndex(i => Math.min(dropdownItems.length - 1, i + 1));
-      } else {
-        const next = historyCtrl.current.navigateDown();
-        apply(next, next.length);
-        setSuppress(true);
+        setDropdownIndex(i => (i >= dropdownItems.length - 1 ? 0 : i + 1));
+        return;
       }
+      const down = moveVertical(inp, cur, 1);
+      if (down !== null) {
+        moveCursor(down);
+        return;
+      }
+      const next = historyCtrl.current.navigateDown();
+      apply(next, next.length);
+      setSuppress(true);
       return;
     }
 
@@ -262,17 +289,26 @@ export function PromptInput({
       return;
     }
 
-    // Home — move cursor to start
-    if (char === '\x1b[H' || (key.ctrl && char === 'a')) {
-      cursorRef.current = 0;
-      setCursor(0);
+    // Ctrl+A / Ctrl+E — start / end of the current line (the whole input when single-line)
+    if (key.ctrl && char === 'a') { moveCursor(lineStart(inp, cur)); return; }
+    if (key.ctrl && char === 'e') { moveCursor(lineEnd(inp, cur)); return; }
+
+    // Ctrl+W / Alt+Backspace — delete the word before the cursor
+    if ((key.ctrl && char === 'w') || ((key.backspace || key.delete) && key.meta)) {
+      const r = deleteWordBefore(inp, cur);
+      apply(r.text, r.cursor);
       return;
     }
 
-    // End — move cursor to end
-    if (char === '\x1b[F' || (key.ctrl && char === 'e')) {
-      cursorRef.current = inp.length;
-      setCursor(inp.length);
+    // Ctrl+U / Ctrl+K — delete to line start / line end
+    if (key.ctrl && char === 'u') {
+      const r = deleteToLineStart(inp, cur);
+      apply(r.text, r.cursor);
+      return;
+    }
+    if (key.ctrl && char === 'k') {
+      const r = deleteToLineEnd(inp, cur);
+      apply(r.text, r.cursor);
       return;
     }
 
@@ -296,10 +332,6 @@ export function PromptInput({
     }
   });
 
-  const promptStr = activeSkill
-    ? `[${activeSkill}] > `
-    : '> ';
-
   const contextFile = showMeta ? detectContextFile(cwd) : null;
 
   // Build the entire input line as a single string with ANSI styling.
@@ -307,32 +339,45 @@ export function PromptInput({
   // independently by Ink's layout engine (squashTextNodes only merges children
   // of the same node). A single <Text> node is squashed into one text block,
   // so Ink wraps it correctly as a continuous stream.
-  const dim = busy;
-  const promptStyled = dim
-    ? chalk.gray(promptStr)
+  // The frame color is the at-a-glance state: grey while a turn runs, purple
+  // inside a skill, accent otherwise.
+  const paint = busy
+    ? chalk.gray
     : activeSkill
-      ? chalk.hex('#6C63FF').bold(promptStr)
-      : chalk.hex(ACCENT)(promptStr);
+      ? chalk.hex('#6C63FF')
+      : chalk.hex(ACCENT);
 
   const beforeCursor = input.slice(0, cursor);
   const cursorChar = input[cursor] ?? ' ';
   const afterCursor = input.slice(cursor + 1);
   // busy mode never shows an inverted cursor block — there's nothing to edit,
   // and an inverted character on frozen text reads as "still interactive"
-  // when it isn't.
-  const styledMiddle = busy ? cursorChar : chalk.inverse(cursorChar);
-  const rawInputLine = beforeCursor + styledMiddle + afterCursor;
-  const inputLine = busy ? chalk.gray(rawInputLine) : rawInputLine;
+  // when it isn't. Inverting a '\n' would swallow the line break, so the
+  // cursor on a line end is drawn as an inverted space before the break.
+  const styledMiddle = busy
+    ? cursorChar
+    : cursorChar === '\n'
+      ? chalk.inverse(' ') + '\n'
+      : chalk.inverse(cursorChar);
+  const allLines = (beforeCursor + styledMiddle + afterCursor).split('\n');
 
-  // Continuation lines (from backslash-continuation newlines) are indented
-  // to align under the first line's text, not under the prompt glyph itself
-  // — lines up visually with where the text starts, same convention as
-  // most REPLs' multi-line prompts.
-  const continuationIndent = ' '.repeat(stringWidth(promptStr));
-  const displayLines = (promptStyled + inputLine).split('\n');
-  const renderedInput = displayLines
-    .map((line, i) => (i === 0 ? line : continuationIndent + line))
+  // Only a window of lines is drawn (≈30% of the terminal); the rules say how
+  // many are hidden above and below, so a long paste can't push the prompt
+  // off screen.
+  const cursorLine = cursorLineIndex(input, cursor);
+  const { start, end } = visibleWindow(allLines.length, cursorLine, maxInputRows(rows));
+  const hiddenAbove = start;
+  const hiddenBelow = allLines.length - end;
+  const renderedInput = allLines
+    .slice(start, end)
+    .map((line) => (busy ? chalk.gray(line) : line))
     .join('\n');
+
+  const topLabel = [activeSkill ?? null, hiddenAbove > 0 ? `↑ ${hiddenAbove} more` : null]
+    .filter(Boolean)
+    .join(' · ');
+  const topRule = paint(buildRule(columns, topLabel || undefined));
+  const bottomRule = paint(buildRule(columns, hiddenBelow > 0 ? `↓ ${hiddenBelow} more` : undefined));
 
   return (
     <Box flexDirection="column">
@@ -350,7 +395,11 @@ export function PromptInput({
       {exitHint && (
         <Text color="yellow">{'(Press Ctrl+C again within 2s to exit)'}</Text>
       )}
-      <Text>{renderedInput}</Text>
+      <Text>{topRule}</Text>
+      <Box paddingX={1}>
+        <Text>{renderedInput}</Text>
+      </Box>
+      <Text>{bottomRule}</Text>
       {!busy && (
         <Dropdown
           items={dropdownItems}

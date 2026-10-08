@@ -1,4 +1,5 @@
 import chalk from 'chalk';
+import { maybeWarnLegacyWindowsConsole } from './terminal-compat.js';
 
 // ── CODEGRUNT wordmark — pixel art ──────────────────────────────────────────
 
@@ -118,4 +119,9 @@ export function printBanner(model: string): void {
     dim('  ·  /help for commands') +
     '\n\n',
   );
+
+  // Runs before mountApp() — this still writes straight to stdout on
+  // purpose (see repl.ts's "Pre-mount setup" note: no live region exists
+  // yet, so there's nothing for a direct stdout write to corrupt).
+  maybeWarnLegacyWindowsConsole((text) => process.stdout.write(text), dim);
 }

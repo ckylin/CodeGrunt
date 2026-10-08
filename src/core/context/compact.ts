@@ -13,9 +13,9 @@
 // Ref: src/core/pipeline/stages/prepare-context.ts L103 for reasoner pattern
 
 import chalk from 'chalk';
-import { isReasonerModel } from '../../config.js';
-import type { LLMProvider, Message, StreamChunk } from '../../types.js';
-import { hasSink } from '../../cli/ink/output-channel.js';
+import { isReasonerModel, fastModelFor } from '../../providers/model-policy.js';
+import type { LLMProvider, Message } from '../../types.js';
+import { hasSink } from '../output/output-channel.js';
 
 // ── Constants ───────────────────────────────────────────────────────────────
 
@@ -92,8 +92,7 @@ export function estimateTokens(messages: Message[]): number {
 // Summarization is a structured task that doesn't need the caller's configured
 // model tier — same downgrade policy as Intentor classification and agent_open.
 export function selectCompactModel(configuredModel: string): string {
-  if (configuredModel.startsWith('deepseek-')) return 'deepseek-v4-flash';
-  return configuredModel;
+  return fastModelFor(configuredModel);
 }
 
 // ── LLM summarization helper ────────────────────────────────────────────────

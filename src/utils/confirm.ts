@@ -5,7 +5,7 @@ import chalk from 'chalk';
 import { selectFromList } from './select.js';
 import { renderAdaptiveDiff, formatDiffStats } from './diff-renderer.js';
 import { isDangerousShellCommand, isDangerousWritePath } from './danger.js';
-import { findExactOrLineEndingTolerant, conformLineEndings } from './line-endings.js';
+import { applyEditToContent } from '../core/tools/edit-diff.js';
 
 function relPath(filePath: string): string {
   const cwd = process.cwd();
@@ -136,12 +136,9 @@ export async function confirmYesNo(prompt: string): Promise<boolean> {
 }
 
 export function applyEdit(original: string, oldString: string, newString: string): string | null {
-  // Tries an exact match first, falling back to a CRLF/LF-normalized match
-  // (see line-endings.ts) — this is what lets old_string match a Windows
-  // CRLF file when the model reproduced it with plain \n.
-  const match = findExactOrLineEndingTolerant(original, oldString);
-  if (match === null) return null;
-  if (match === 'AMBIGUOUS') return 'AMBIGUOUS';
-  const replacement = conformLineEndings(newString, match.matchedText);
-  return original.slice(0, match.start) + replacement + original.slice(match.end);
+  // Same matcher as the edit_file tool (exact, then CRLF-tolerant, then fuzzy),
+  // so the diff shown for confirmation is exactly what will be written.
+  const applied = applyEditToContent(original, oldString, newString);
+  if (applied === null || applied === 'AMBIGUOUS') return applied;
+  return applied.content;
 }

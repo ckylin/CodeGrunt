@@ -2,7 +2,8 @@
 // Provides real-time web search capability to the agent.
 //
 // Supported engines (configurable via CODEGRUNT_SEARCH_ENGINE env var or
-// ~/.codegrunt/config.json `searchEngine`):
+// ~/.codegrunt/config.json `searchEngine`), each a SearchEngine in
+// ./web-search/engines/:
 //
 //   mojeek    — default. Privacy-respecting, no API key required.
 //               Uses Mojeek's public search endpoint.
@@ -14,160 +15,16 @@
 
 import type { Tool, ToolResult } from '../../types.js';
 import { getLogger } from '../observability/logger.js';
+import { getSearchEngine, runSearch } from './web-search/index.js';
+
+export { getSearchEngine };
 
 const log = getLogger('tools:web_search');
 
 const DEFAULT_NUM_RESULTS = 5;
-const REQUEST_TIMEOUT_MS = 10_000;
-
-// ── Engine adapters ───────────────────────────────────────────────────────
-
-interface SearchResult {
-  title: string;
-  url: string;
-  snippet: string;
-}
-
-async function fetchWithTimeout(url: string, options: RequestInit = {}): Promise<Response> {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
-  try {
-    const res = await fetch(url, { ...options, signal: controller.signal });
-    return res;
-  } finally {
-    clearTimeout(timer);
-  }
-}
-
-async function searchMojeek(query: string, numResults: number): Promise<SearchResult[]> {
-  // Mojeek public search — returns HTML, parse JSON-LD or result blocks
-  const url = `https://www.mojeek.com/search?q=${encodeURIComponent(query)}&fmt=json&num=${numResults}`;
-  const res = await fetchWithTimeout(url, {
-    headers: { 'User-Agent': 'CodeGrunt/0.1 (+https://github.com/ckylin/CodeGrunt)' },
-  });
-  if (!res.ok) throw new Error(`Mojeek returned ${res.status}`);
-
-  // Mojeek has a JSON endpoint for some queries; try to parse
-  const ct = res.headers.get('content-type') ?? '';
-  if (ct.includes('application/json')) {
-    const data = await res.json() as { results?: Array<{ title?: string; url?: string; desc?: string }> };
-    return (data.results ?? []).slice(0, numResults).map(r => ({
-      title: r.title ?? '',
-      url: r.url ?? '',
-      snippet: r.desc ?? '',
-    }));
-  }
-
-  // Fall back to HTML parsing (simple regex extraction)
-  const html = await res.text();
-  return parseMojeekHtml(html, numResults);
-}
-
-function parseMojeekHtml(html: string, max: number): SearchResult[] {
-  const results: SearchResult[] = [];
-  // Match result blocks: <a class="title" href="...">...</a> ... <p class="s">...</p>
-  const blockRe = /<li[^>]*class="[^"]*result[^"]*"[^>]*>([\s\S]*?)<\/li>/gi;
-  let block: RegExpExecArray | null;
-  while ((block = blockRe.exec(html)) !== null && results.length < max) {
-    const content = block[1];
-    const titleMatch = content.match(/<a[^>]*class="[^"]*title[^"]*"[^>]*href="([^"]+)"[^>]*>([^<]+)<\/a>/i);
-    const snippetMatch = content.match(/<p[^>]*class="[^"]*s[^"]*"[^>]*>([\s\S]*?)<\/p>/i);
-    if (titleMatch) {
-      results.push({
-        title: titleMatch[2].trim(),
-        url: titleMatch[1],
-        snippet: snippetMatch ? snippetMatch[1].replace(/<[^>]+>/g, '').trim() : '',
-      });
-    }
-  }
-  return results;
-}
-
-async function searchSearXNG(query: string, numResults: number, baseUrl: string): Promise<SearchResult[]> {
-  // searxngUrl comes from config/env, not from the LLM directly, but it's
-  // still user-supplied and unvalidated at the point it's set (config.ts,
-  // /search-engine). Validate here — the actual network boundary — so a
-  // malformed value fails clearly instead of producing a confusing fetch
-  // error, and non-http(s) schemes (file:, gopher:, etc.) can't be used.
-  let parsed: URL;
-  try {
-    parsed = new URL(baseUrl);
-  } catch {
-    throw new Error(`Invalid searxngUrl: "${baseUrl}"`);
-  }
-  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
-    throw new Error(`searxngUrl must use http or https, got: ${parsed.protocol}`);
-  }
-
-  const url = `${baseUrl.replace(/\/$/, '')}/search?q=${encodeURIComponent(query)}&format=json&num_results=${numResults}`;
-  const res = await fetchWithTimeout(url, {
-    headers: { 'Accept': 'application/json' },
-  });
-  if (!res.ok) throw new Error(`SearXNG returned ${res.status}`);
-  const data = await res.json() as { results?: Array<{ title?: string; url?: string; content?: string }> };
-  return (data.results ?? []).slice(0, numResults).map(r => ({
-    title: r.title ?? '',
-    url: r.url ?? '',
-    snippet: r.content ?? '',
-  }));
-}
-
-async function searchDuckDuckGo(query: string, numResults: number): Promise<SearchResult[]> {
-  // DuckDuckGo Instant Answers API (no web results) + HTML fallback
-  const url = `https://api.duckduckgo.com/?q=${encodeURIComponent(query)}&format=json&no_html=1&skip_disambig=1`;
-  const res = await fetchWithTimeout(url);
-  if (!res.ok) throw new Error(`DuckDuckGo returned ${res.status}`);
-  const data = await res.json() as {
-    AbstractText?: string;
-    AbstractURL?: string;
-    AbstractSource?: string;
-    RelatedTopics?: Array<{ Text?: string; FirstURL?: string }>;
-  };
-
-  const results: SearchResult[] = [];
-  if (data.AbstractText && data.AbstractURL) {
-    results.push({
-      title: data.AbstractSource ?? 'DuckDuckGo',
-      url: data.AbstractURL,
-      snippet: data.AbstractText,
-    });
-  }
-  for (const topic of data.RelatedTopics ?? []) {
-    if (results.length >= numResults) break;
-    if (topic.FirstURL && topic.Text) {
-      results.push({ title: topic.Text.slice(0, 80), url: topic.FirstURL, snippet: topic.Text });
-    }
-  }
-  return results;
-}
-
-// ── Engine selector ───────────────────────────────────────────────────────
-
-export function getSearchEngine(): { engine: string; searxngUrl?: string } {
-  const engine = process.env['CODEGRUNT_SEARCH_ENGINE'] ?? 'mojeek';
-  const searxngUrl = process.env['CODEGRUNT_SEARXNG_URL'];
-  return { engine, searxngUrl };
-}
-
-async function runSearch(query: string, numResults: number): Promise<SearchResult[]> {
-  const { engine, searxngUrl } = getSearchEngine();
-
-  switch (engine) {
-    case 'searxng': {
-      const url = searxngUrl ?? 'http://localhost:8080';
-      return searchSearXNG(query, numResults, url);
-    }
-    case 'duckduckgo':
-      return searchDuckDuckGo(query, numResults);
-    case 'mojeek':
-    default:
-      return searchMojeek(query, numResults);
-  }
-}
-
-// ── Tool definition ───────────────────────────────────────────────────────
 
 export const webSearchTool: Tool = {
+  meta: { subagentSafe: true },
   definition: {
     type: 'function',
     function: {

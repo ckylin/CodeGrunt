@@ -38,7 +38,6 @@
 //   4. User types /switch <branch-id> to switch to a different branch
 
 import { readFile, writeFile, mkdir } from 'fs/promises';
-import { existsSync } from 'fs';
 import { join } from 'path';
 import { homedir } from 'os';
 import { randomUUID } from 'crypto';

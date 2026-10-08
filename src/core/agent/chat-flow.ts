@@ -8,9 +8,9 @@ import chalk from 'chalk';
 import { ContextManager } from '../context/manager.js';
 import { getDefaultMetrics } from '../observability/metrics.js';
 import { getLogger } from '../observability/logger.js';
-import { MAX_ITERATIONS, displayToolCalls, runGenerator } from './generator.js';
+import { runToolLoop } from './tool-loop.js';
 import { PrepareContextStage } from '../pipeline/stages/prepare-context.js';
-import { write as chWrite } from '../../cli/ink/output-channel.js';
+import { write as chWrite } from '../output/output-channel.js';
 
 const log = getLogger('agent:chat-flow');
 
@@ -20,28 +20,11 @@ export async function runChatFlow(
   lang: 'zh' | 'en',
   metrics: ReturnType<typeof getDefaultMetrics>,
 ): Promise<{ responseLength: number }> {
-  const { task, onToolCall, onToolResult, signal } = options;
-
   log.info('Phase 1 (chat): direct generation — no Evaluator');
 
-  const prepareStage = new PrepareContextStage();
-  const genResult = await runGenerator(context, options, lang, 0, undefined, false, prepareStage);
-
-  if (genResult.userRejected) { log.info('Chat flow ended — user rejected'); return { responseLength: 0 }; }
-  if (genResult.error) throw genResult.error;
-
-  displayToolCalls(genResult.pipeCtx, onToolCall, onToolResult);
-
-  let iteration = 1;
-  let current = genResult;
-  while (!current.done && current.pipeCtx.toolCalls.length > 0 && iteration < MAX_ITERATIONS) {
-    if (signal?.aborted) break;
-    current = await runGenerator(context, options, lang, iteration, undefined, false, prepareStage);
-    if (current.userRejected) break;
-    if (current.error) throw current.error;
-    displayToolCalls(current.pipeCtx, onToolCall, onToolResult);
-    iteration++;
-  }
+  const { last: current, iterations: iteration, rejectedAtStart } =
+    await runToolLoop(context, options, lang, new PrepareContextStage());
+  if (rejectedAtStart) { log.info('Chat flow ended — user rejected'); return { responseLength: 0 }; }
 
   const finalText = current.pipeCtx.assistantText;
   if (!finalText && current.pipeCtx.toolCalls.length === 0) {

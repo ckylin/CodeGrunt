@@ -8,7 +8,7 @@
 //   - Simple log rotation: keeps last 5 log files, max 5 MB each
 //   - Environment: CODEGRUNT_LOG_LEVEL, CODEGRUNT_LOG_FILE, CODEGRUNT_VERBOSE
 
-import { mkdir, appendFile, stat, readdir, unlink } from 'fs/promises';
+import { mkdir, appendFile, readdir, unlink } from 'fs/promises';
 import { homedir } from 'os';
 import { join, dirname } from 'path';
 import { getDefaultEventBus, type ErrorEvent } from '../events/bus.js';

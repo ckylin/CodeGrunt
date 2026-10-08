@@ -8,7 +8,7 @@
 // DeepSeek quality assurance — planner produces structured task plans,
 // generator executes them, evaluator verifies output quality.
 
-import type { Message, ToolCall, ToolResult, ToolDefinition, LLMProvider, CodeGruntConfig } from '../../types.js';
+import type { Message, ToolCall, ToolDefinition, LLMProvider, CodeGruntConfig } from '../../types.js';
 
 // ── P/G/E Types ──────────────────────────────────────────────────────────
 
@@ -36,6 +36,10 @@ export interface PlanStep {
   expectedOutcome: string;
   /** How to verify this step was done correctly */
   verification: string;
+  /** True if this step has no data dependency on other steps in the same batch — Orchestrator may run it concurrently with adjacent parallelizable steps */
+  parallelizable?: boolean;
+  /** Files this step is expected to touch — used to detect write conflicts before batching parallel steps */
+  targetFiles?: string[];
 }
 
 /** A structured task execution plan */
@@ -165,7 +169,3 @@ export interface StreamEmitter {
   onFinish(reason: 'stop' | 'tool_calls' | 'length'): void;
 }
 
-// ── Anti-hallucination config ────────────────────────────────────────────
-
-export const READ_TOOL_NAMES = new Set(['read_file', 'search_files', 'list_directory']);
-export const WRITE_TOOL_NAMES = new Set(['write_file', 'edit_file']);

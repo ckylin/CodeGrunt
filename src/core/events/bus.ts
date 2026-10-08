@@ -70,6 +70,20 @@ export interface ErrorEvent {
   timestamp: number;
 }
 
+/** Emitted by the Orchestrator when a batch of plan steps completes (serial or parallel). */
+export interface OrchestratorBatchEvent {
+  type: 'orchestrator:batch';
+  /** 0-based batch index within the plan */
+  batchIndex: number;
+  /** 'parallel' when >1 step ran concurrently via worker.ts, 'serial' otherwise */
+  mode: 'parallel' | 'serial';
+  stepIds: number[];
+  succeededStepIds: number[];
+  failedStepIds: number[];
+  durationMs: number;
+  timestamp: number;
+}
+
 export type CodeGruntEvent =
   | { type: 'pipeline:started'; pipelineName: string; timestamp: number }
   | { type: 'pipeline:finished'; pipelineName: string; durationMs: number; success: boolean; timestamp: number }
@@ -79,7 +93,8 @@ export type CodeGruntEvent =
   | ToolResultEvent
   | LLMRequestEvent
   | LLMUsageEvent
-  | ErrorEvent;
+  | ErrorEvent
+  | OrchestratorBatchEvent;
 
 // ── Event Bus ──────────────────────────────────────────────────────────────
 

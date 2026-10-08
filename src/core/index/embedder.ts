@@ -11,7 +11,7 @@
 // This gives "semantic-like" fuzzy matching: `getUserById` will also match
 // `fetchUser`, `UserService`, etc. based on shared subword tokens.
 
-import type { CodeSymbol } from './index.js';
+import type { CodeSymbol } from './types.js';
 
 // ── Types ─────────────────────────────────────────────────────────────────
 
@@ -215,7 +215,6 @@ export function semanticSearch(
   maxResults: number = 20,
 ): SemanticHit[] {
   const queryTokens = tokenizeQuery(query);
-  const uniqueTokens = [...new Set(queryTokens)];
 
   // Build query TF vector
   const queryTf = new Map<string, number>();

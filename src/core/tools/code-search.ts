@@ -13,6 +13,7 @@ const log = getLogger('tools:code_search');
 const VALID_KINDS: ReadonlySet<string> = new Set(['function', 'class', 'interface', 'type', 'export', 'const', 'variable']);
 
 export const codeSearchTool: Tool = {
+  meta: { subagentSafe: true },
   definition: {
     type: 'function',
     function: {

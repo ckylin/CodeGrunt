@@ -2,7 +2,7 @@
 // Handler functions for /branch, /tree, /switch, /subagent-cache slash commands.
 
 import chalk from 'chalk';
-import { readdirSync, readFileSync } from 'fs';
+import { readFileSync } from 'fs';
 import { join } from 'path';
 import { homedir } from 'os';
 import type { ContextManager } from '../core/context/manager.js';
@@ -11,9 +11,7 @@ import {
   forkBranch, switchToBranch, visualizeBranchTree, getCheckpoint,
 } from '../core/session/branching.js';
 import { getSubagentCacheStats, clearSubagentCache } from '../core/agent/subagent.js';
-import { getLogger } from '../core/observability/logger.js';
 
-const log = getLogger('cli:branch');
 const BRANCHES_DIR = join(homedir(), '.codegrunt', 'branches');
 
 /**
@@ -121,7 +119,6 @@ export async function handleSwitchBranch(
   try {
     // Find the branch file by scanning the branches directory
     let sessionFile: string | undefined;
-    let sessionId: string | undefined;
 
     try {
       const { readdir } = await import('fs/promises');
@@ -145,7 +142,7 @@ export async function handleSwitchBranch(
       return;
     }
 
-    sessionId = sessionFile.replace('.branches.json', '');
+    const sessionId = sessionFile.replace('.branches.json', '');
     const tree = await loadBranchTree(sessionId);
     const msgCount = switchToBranch(tree, id);
 

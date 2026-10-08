@@ -1,14 +1,17 @@
 import { readFile, writeFile as fsWriteFile, mkdir } from 'fs/promises';
 import { existsSync } from 'fs';
-import { dirname, resolve } from 'path';
+import { dirname } from 'path';
 import type { Tool, ToolResult } from '../../types.js';
+import { withFileMutationQueue } from './file-mutation-queue.js';
+import { resolveToCwd } from './path-utils.js';
 
 export const writeFileTool: Tool = {
+  meta: { writesFiles: true, destructive: true },
   definition: {
     type: 'function',
     function: {
       name: 'write_file',
-      description: 'Write content to a file, creating parent directories if needed. Overwrites existing content.',
+      description: 'Write content to a file, creating parent directories if needed. Overwrites existing content. Use only for new files or complete rewrites; prefer edit_file for targeted changes.',
       parameters: {
         type: 'object',
         properties: {
@@ -26,33 +29,37 @@ export const writeFileTool: Tool = {
     },
   },
 
-  async execute(args): Promise<ToolResult> {
-    const filePath = resolve(args.path as string);
+  async execute(args, ctx): Promise<ToolResult> {
+    const filePath = resolveToCwd(args.path as string, ctx?.cwd);
     const content = args.content as string;
-    try {
-      // The confirmation dialog reads the file, then waits (unbounded) for user
-      // input before this executes. Re-read here rather than trusting the
-      // pre-read snapshot in args._originalContent — if the file changed on disk
-      // during that wait (external editor, another process), overwrite would
-      // silently destroy the newer content.
-      const preRead = args._originalContent as string | undefined;
-      if (preRead !== undefined) {
-        const current = existsSync(filePath) ? await readFile(filePath, 'utf-8') : '';
-        if (preRead !== current) {
-          return {
-            success: false,
-            output: '',
-            error: `File ${filePath} was modified on disk after the write was confirmed. Re-read the file and retry to avoid overwriting the newer content.`,
-          };
+    const confirmDurationMs = (args._confirmDurationMs as number | undefined) ?? 0;
+
+    return withFileMutationQueue(filePath, async () => {
+      try {
+        if (ctx?.signal?.aborted) return { success: false, output: '', error: 'Operation aborted' };
+
+        // The confirmation dialog reads the file, then waits (unbounded) for user
+        // input before this executes. Re-read here rather than trusting the
+        // pre-read snapshot: if the file changed on disk during that wait,
+        // overwriting would silently destroy the newer content.
+        const preRead = args._originalContent as string | undefined;
+        if (preRead !== undefined) {
+          const current = existsSync(filePath) ? await readFile(filePath, 'utf-8') : '';
+          if (preRead !== current) {
+            return {
+              success: false,
+              output: '',
+              error: `File ${filePath} was modified on disk after the write was confirmed. Re-read the file and retry to avoid overwriting the newer content.`,
+            };
+          }
         }
+        await mkdir(dirname(filePath), { recursive: true });
+        await fsWriteFile(filePath, content, 'utf-8');
+        return { success: true, output: `Wrote ${content.length} chars to ${filePath}`, confirmDurationMs };
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        return { success: false, output: '', error: `Failed to write ${filePath}: ${message}` };
       }
-      await mkdir(dirname(filePath), { recursive: true });
-      await fsWriteFile(filePath, content, 'utf-8');
-      // Diff already shown in confirmation dialog; here we just confirm success
-      return { success: true, output: `Wrote ${content.length} chars to ${filePath}` , confirmDurationMs: (args._confirmDurationMs as number) ?? 0 };
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      return { success: false, output: '', error: `Failed to write ${filePath}: ${message}` };
-    }
+    });
   },
 };

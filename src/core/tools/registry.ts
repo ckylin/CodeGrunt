@@ -5,17 +5,17 @@
 //
 // Ref: Original static registry at src/core/tools/registry.ts
 
-import type { Tool, ToolDefinition } from '../../types.js';
-import { readFileTool } from './read_file.js';
-import { writeFileTool } from './write_file.js';
-import { editFileTool } from './edit_file.js';
-import { executeShellTool } from './execute_shell.js';
-import { listDirectoryTool } from './list_directory.js';
-import { searchFilesTool } from './search_files.js';
+import type { Tool, ToolDefinition, ToolMeta } from '../../types.js';
+import { readFileTool } from './read-file.js';
+import { writeFileTool } from './write-file.js';
+import { editFileTool } from './edit-file.js';
+import { executeShellTool } from './execute-shell.js';
+import { listDirectoryTool } from './list-directory.js';
+import { searchFilesTool } from './search-files.js';
 import { memoryWriteTool, memoryReadTool } from './memory.js';
-import { webSearchTool } from './web_search.js';
-import { codeSearchTool } from './code_search.js';
-import { agentOpenTool } from './agent_open.js';
+import { webSearchTool } from './web-search.js';
+import { codeSearchTool } from './code-search.js';
+import { agentOpenTool } from './agent-open.js';
 import { getLogger } from '../observability/logger.js';
 
 const log = getLogger('tools:registry');
@@ -79,6 +79,18 @@ class ToolRegistry {
     }));
   }
 
+  /** Traits a tool declared; tools registered without `meta` (e.g. MCP) have none. */
+  getMeta(name: string): ToolMeta {
+    return this.tools.get(name)?.tool.meta ?? {};
+  }
+
+  /** Names of all registered tools that declare the given trait. */
+  namesWith(trait: keyof ToolMeta): string[] {
+    return Array.from(this.tools.entries())
+      .filter(([, reg]) => reg.tool.meta?.[trait] === true)
+      .map(([name]) => name);
+  }
+
   /** Number of registered tools */
   get size(): number {
     return this.tools.size;
@@ -120,6 +132,14 @@ export function getToolDefinitions(): ToolDefinition[] {
 
 export function getToolByName(name: string): Tool | undefined {
   return getToolRegistry().getByName(name);
+}
+
+export function toolHasTrait(name: string, trait: keyof ToolMeta): boolean {
+  return getToolRegistry().getMeta(name)[trait] === true;
+}
+
+export function toolNamesWithTrait(trait: keyof ToolMeta): Set<string> {
+  return new Set(getToolRegistry().namesWith(trait));
 }
 
 export { getToolRegistry };

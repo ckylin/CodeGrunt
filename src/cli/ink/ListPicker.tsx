@@ -1,8 +1,7 @@
 import React, { useState } from 'react';
 import { Box, Text, useInput } from 'ink';
 import { ACCENT } from '../../utils/constants.js';
-import type { ListPickerProps } from './types.js';
-import type { SelectorItem } from '../../utils/select.js';
+import type { ListPickerProps, SelectorItem } from './types.js';
 
 export function ListPicker({ title, items, currentValue, onSubmit }: ListPickerProps): React.ReactElement {
   const initialIndex = Math.max(0, items.findIndex(i => i.value === currentValue));

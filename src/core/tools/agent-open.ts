@@ -14,7 +14,7 @@
 // v1 is synchronous: one call = one sub-agent, run to completion.
 
 import type { Tool, ToolResult } from '../../types.js';
-import { runSubagent, runSubagentsConcurrent, getSubagentContext } from '../agent/subagent.js';
+import { getSubagentContext, getSubagentRunners } from '../agent/subagent-runtime.js';
 import { getLogger } from '../observability/logger.js';
 
 const log = getLogger('tools:agent_open');
@@ -61,19 +61,21 @@ export const agentOpenTool: Tool = {
             description: 'Per-agent timeout in milliseconds. Default: 120000 (120s).',
           },
         },
+        required: ['task'],
       },
     },
   },
 
-  async execute(args): Promise<ToolResult> {
-    const cwd = (args.cwd as string | undefined) ?? process.cwd();
+  async execute(args, toolCtx): Promise<ToolResult> {
+    const cwd = (args.cwd as string | undefined) ?? toolCtx?.cwd ?? process.cwd();
     const concurrency = args.concurrency === true;
     const useCache = args.use_cache === true;
     const timeoutMs = args.timeout_ms as number | undefined;
     const modelOverride = args.model as string | undefined;
 
     const ctx = getSubagentContext();
-    if (!ctx) {
+    const runners = getSubagentRunners();
+    if (!ctx || !runners) {
       return {
         success: false,
         output: '',
@@ -101,7 +103,7 @@ export const agentOpenTool: Tool = {
       log.info('Spawning concurrent sub-agents', { taskCount: taskList.length, model });
 
       try {
-        const result = await runSubagentsConcurrent({
+        const result = await runners.runSubagentsConcurrent({
           tasks: taskList.map(task => ({
             task,
             cwd,
@@ -150,7 +152,7 @@ export const agentOpenTool: Tool = {
 
     log.info('Spawning sub-agent', { task: task.slice(0, 100), model, useCache, timeoutMs });
 
-    const result = await runSubagent({
+    const result = await runners.runSubagent({
       task,
       cwd,
       provider: ctx.provider,

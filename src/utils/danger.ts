@@ -4,7 +4,7 @@
 // land outside the project or in credential/VCS-internal paths. Detected
 // operations force a second confirmation even when yes-for-all/auto trust
 // mode is active — see confirmOrSkip/confirmShellOrSkip in
-// process-tools-helpers.ts.
+// policy/confirm.ts.
 //
 // This is a heuristic safety net, not a sandbox: it catches common
 // destructive patterns, not every possible dangerous command.

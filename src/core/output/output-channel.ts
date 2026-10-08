@@ -86,6 +86,56 @@ export interface OutputChannelSink {
 let sink: OutputChannelSink | null = null;
 let liveTextBuffer = '';
 
+// ── Live-text render throttling ─────────────────────────────────────────
+// LLM stream deltas can arrive many times per second (every few characters
+// on a fast connection), and each one used to call sink.setLiveText()
+// synchronously — every call is a React setState that Ink repaints
+// immediately via log-update's cursor-reposition + redraw sequence. Most
+// modern terminal emulators (Windows Terminal, iTerm2, most Linux/macOS
+// terminals) coalesce or keep up with that easily. Legacy Windows consoles
+// (cmd.exe / powershell.exe running under conhost.exe, NOT Windows
+// Terminal) have a much more fragile VT/ANSI cursor-repositioning parser —
+// pushed at LLM-token rate, this is exactly the load pattern that makes it
+// lose track of the cursor and fall back to appending a new line per
+// update instead of repainting in place. Rate-limiting the redraw itself
+// (independent of how fast deltas arrive) fixes this everywhere, not just
+// on legacy consoles, since no terminal benefits from redrawing faster than
+// a human can read anyway.
+const LIVE_TEXT_RENDER_THROTTLE_MS = 50; // ~20fps — smooth, well below what stresses fragile terminal redraw
+let renderTimer: ReturnType<typeof setTimeout> | null = null;
+let lastRenderAt = 0;
+
+/** Trailing-edge throttle: renders immediately if enough time has passed
+ *  since the last render, otherwise schedules exactly one trailing render
+ *  for when the throttle window elapses (never queues more than one). */
+function scheduleLiveTextRender(): void {
+  if (!sink) return;
+  const now = Date.now();
+  const elapsed = now - lastRenderAt;
+  if (elapsed >= LIVE_TEXT_RENDER_THROTTLE_MS) {
+    lastRenderAt = now;
+    sink.setLiveText(liveTextBuffer);
+    return;
+  }
+  if (renderTimer) return; // a trailing render is already scheduled
+  renderTimer = setTimeout(() => {
+    renderTimer = null;
+    lastRenderAt = Date.now();
+    if (sink) sink.setLiveText(liveTextBuffer);
+  }, LIVE_TEXT_RENDER_THROTTLE_MS - elapsed);
+}
+
+/** Cancels any pending throttled render and resets the rate limiter so the
+ *  next turn's first delta renders immediately rather than waiting out a
+ *  throttle window left over from the previous turn. */
+function resetLiveTextRenderThrottle(): void {
+  if (renderTimer) {
+    clearTimeout(renderTimer);
+    renderTimer = null;
+  }
+  lastRenderAt = 0;
+}
+
 /** Called once by the persistent <App> component on mount. */
 export function registerSink(s: OutputChannelSink): void {
   sink = s;
@@ -95,6 +145,7 @@ export function registerSink(s: OutputChannelSink): void {
 export function unregisterSink(): void {
   sink = null;
   liveTextBuffer = '';
+  resetLiveTextRenderThrottle();
 }
 
 export function hasSink(): boolean {
@@ -130,7 +181,7 @@ export function write(text: string): void {
 export function appendLiveText(delta: string): void {
   if (sink) {
     liveTextBuffer += delta;
-    sink.setLiveText(liveTextBuffer);
+    scheduleLiveTextRender();
   } else {
     process.stdout.write(delta);
   }
@@ -147,7 +198,7 @@ export function appendLiveText(delta: string): void {
  */
 export function setLiveTextDirect(text: string): void {
   liveTextBuffer = text;
-  if (sink) sink.setLiveText(text);
+  scheduleLiveTextRender();
 }
 
 /**
@@ -158,6 +209,10 @@ export function setLiveTextDirect(text: string): void {
  * visually concatenate with an uncommitted leftover from this one.
  */
 export function commitLiveText(): void {
+  // Cancel any pending throttled render first — otherwise it could fire
+  // AFTER this function clears the buffer and re-populate the sink's live
+  // text with content that's already been committed to permanent history.
+  resetLiveTextRenderThrottle();
   if (sink && liveTextBuffer) {
     sink.writeLine(liveTextBuffer);
   }
@@ -169,6 +224,7 @@ export function commitLiveText(): void {
  *  abort, where partial streamed text should not become a permanent entry —
  *  matches how aborted one-shot output already just stops mid-stream). */
 export function discardLiveText(): void {
+  resetLiveTextRenderThrottle();
   liveTextBuffer = '';
   if (sink) sink.setLiveText('');
 }

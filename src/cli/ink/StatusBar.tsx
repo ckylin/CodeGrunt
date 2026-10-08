@@ -31,7 +31,7 @@ export function StatusBar({ model, gitBranch, totalTokens, busySince, elapsedSec
   ].filter(Boolean);
 
   return (
-    <Box justifyContent="space-between">
+    <Box justifyContent="space-between" paddingX={1}>
       <Text dimColor>{segments.join('  ·  ')}</Text>
       {busySince !== null && (
         <Text color={ACCENT}>{`${elapsedSeconds}s · Esc to cancel`}</Text>
